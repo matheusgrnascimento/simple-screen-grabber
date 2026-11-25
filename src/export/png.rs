@@ -26,9 +26,14 @@ fn factory() -> Result<IWICImagingFactory> {
 /// so no alpha channel is stored). Lossless: every pixel is kept as is.
 fn encode(factory: &IWICImagingFactory, image: &Image, stream: &IStream) -> Result<()> {
     let row = image.width as usize * 3;
-    let mut rgb = Vec::with_capacity(row * image.height as usize);
-    for pixel in image.pixels.as_chunks::<4>().0 {
-        rgb.extend_from_slice(&pixel[..3]);
+    let mut rgb = vec![0u8; row * image.height as usize];
+    for (out, pixel) in rgb
+        .as_chunks_mut::<3>()
+        .0
+        .iter_mut()
+        .zip(image.pixels.as_chunks::<4>().0)
+    {
+        *out = [pixel[0], pixel[1], pixel[2]];
     }
     // SAFETY: plain COM calls; `rgb` holds height rows of `row` bytes and
     // outlives WritePixels.
