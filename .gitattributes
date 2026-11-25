@@ -1,0 +1,3 @@
+# Keep LF in every checkout, also with core.autocrlf=true, so cargo fmt
+# leaves a fresh clone unchanged.
+* text=auto eol=lf

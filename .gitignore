@@ -1,0 +1,6 @@
+/target
+/dist
+/installer/license.rtf
+# Local settings and the portable marker, when the app runs from the root.
+/config.toml
+/portable
