@@ -200,6 +200,8 @@ pub fn run(options: Options) -> Result<()> {
         );
     }
     APP.with(|cell| *cell.borrow_mut() = Some(app));
+    // Idle from here on: give the start-up pages back to Windows.
+    win::trim_working_set();
 
     let result = message_loop();
 

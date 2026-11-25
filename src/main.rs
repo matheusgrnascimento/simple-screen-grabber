@@ -5,6 +5,7 @@
 
 mod annotate;
 mod app;
+mod bench;
 mod capture;
 mod config;
 mod export;
@@ -24,12 +25,20 @@ use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
 
 fn main() {
     let mut options = app::Options::default();
+    let mut bench = false;
     for arg in std::env::args().skip(1) {
-        if arg == "--autostart" {
-            options.autostart = true;
+        match arg.as_str() {
+            "--autostart" => options.autostart = true,
+            "--bench" => bench = true,
+            _ => {}
         }
     }
-    if let Err(err) = app::run(options) {
+    let result = if bench {
+        bench::run()
+    } else {
+        app::run(options)
+    };
+    if let Err(err) = result {
         log!("fatal: {err}");
         let text = win::wide(&format!("Simple Screen Grabber could not start.\n\n{err}"));
         // SAFETY: shows a modal message box with a null-terminated string

@@ -5,8 +5,9 @@ use windows::core::{Interface, Result};
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_RECT_F};
 use windows::Win32::Graphics::Direct2D::{
-    D2D1CreateFactory, ID2D1DeviceContext, ID2D1Factory1, D2D1_DEVICE_CONTEXT_OPTIONS_NONE,
-    D2D1_FACTORY_OPTIONS, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE,
+    D2D1CreateFactory, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1,
+    D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_FACTORY_OPTIONS, D2D1_FACTORY_TYPE_SINGLE_THREADED,
+    D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE,
 };
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE, D3D_DRIVER_TYPE_WARP};
 use windows::Win32::Graphics::Direct3D11::{
@@ -15,12 +16,13 @@ use windows::Win32::Graphics::Direct3D11::{
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, DWRITE_FACTORY_TYPE_SHARED,
 };
-use windows::Win32::Graphics::Dxgi::{IDXGIDevice1, IDXGIFactory2};
+use windows::Win32::Graphics::Dxgi::{IDXGIDevice1, IDXGIDevice3, IDXGIFactory2};
 
 use crate::fluent::Color;
 
 pub struct Gfx {
     pub d3d: ID3D11Device,
+    device: ID2D1Device,
     pub dxgi_factory: IDXGIFactory2,
     pub ctx: ID2D1DeviceContext,
     pub dwrite: IDWriteFactory,
@@ -57,10 +59,30 @@ impl Gfx {
             let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
             Ok(Gfx {
                 d3d,
+                device,
                 dxgi_factory,
                 ctx,
                 dwrite,
             })
+        }
+    }
+}
+
+impl Gfx {
+    /// Gives back the memory that Direct2D and the device keep in caches
+    /// after drawing (effect intermediates, freed surfaces), once the
+    /// overlay closes.
+    pub fn release_caches(&self) {
+        // SAFETY: plain calls on devices owned here; nothing is drawing.
+        unsafe {
+            self.device.ClearResources(0);
+            if let Ok(ctx) = self.d3d.GetImmediateContext() {
+                ctx.ClearState();
+                ctx.Flush();
+            }
+            if let Ok(dxgi) = self.d3d.cast::<IDXGIDevice3>() {
+                dxgi.Trim();
+            }
         }
     }
 }

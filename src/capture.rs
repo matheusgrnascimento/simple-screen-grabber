@@ -148,8 +148,15 @@ impl Drop for MemoryDc {
     }
 }
 
-/// Copies the virtual screen into memory.
+/// Copies the virtual screen into memory, including layered windows such
+/// as menus and tooltips.
 pub fn capture_screen() -> Result<Capture> {
+    capture_screen_with(true)
+}
+
+/// Copies the virtual screen; `layered` adds CAPTUREBLT, which includes
+/// layered windows.
+pub fn capture_screen_with(layered: bool) -> Result<Capture> {
     // SAFETY: system metric queries; with per-monitor DPI awareness they
     // are in physical pixels.
     let (x, y, width, height) = unsafe {
@@ -198,18 +205,12 @@ pub fn capture_screen() -> Result<Capture> {
             },
         };
         let previous = SelectObject(memory.0, bitmap.into());
-        // CAPTUREBLT includes layered windows (menus, tooltips).
-        let copied = BitBlt(
-            memory.0,
-            0,
-            0,
-            width,
-            height,
-            Some(screen.0),
-            x,
-            y,
-            SRCCOPY | CAPTUREBLT,
-        );
+        let rop = if layered {
+            SRCCOPY | CAPTUREBLT
+        } else {
+            SRCCOPY
+        };
+        let copied = BitBlt(memory.0, 0, 0, width, height, Some(screen.0), x, y, rop);
         SelectObject(memory.0, previous);
         copied?;
         Ok(capture)

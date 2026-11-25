@@ -8,6 +8,7 @@
 //! appears complete, with no flash. Closing hides it and releases the
 //! capture, the bitmap and the swap chain buffers.
 
+mod dimmer;
 mod layout;
 mod render;
 pub mod selection;
@@ -78,6 +79,17 @@ const FADE_TIMER: usize = 1;
 const FADE_SECONDS: f32 = 0.167;
 /// Swap chain size while hidden: the buffers are freed, not the chain.
 const IDLE_BUFFER: u32 = 8;
+
+/// How long the steps of opening the overlay took.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct OpenTimings {
+    /// Copying the screen.
+    pub capture: std::time::Duration,
+    /// Uploading it for drawing.
+    pub upload: std::time::Duration,
+    /// Drawing and presenting the first frame.
+    pub first_frame: std::time::Duration,
+}
 
 /// What the overlay asks the app to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -302,6 +314,12 @@ pub struct Overlay {
     /// starts with, from the settings.
     default_color: usize,
     default_width: f32,
+    /// Dims the screen at once while it is being copied.
+    dimmer: Option<dimmer::Dimmer>,
+    /// The steps of the last `open`, for the benchmark.
+    pub last_open: OpenTimings,
+    /// The size of the last capture.
+    last_size: (i32, i32),
 }
 
 impl Overlay {
@@ -373,6 +391,7 @@ impl Overlay {
         };
         let painter = render::Painter::new(&gfx.ctx, &gfx.dwrite)?;
         let shapes = ShapePainter::new(&gfx.ctx)?;
+        let dimmer = dimmer::Dimmer::new(theme.palette.scrim.a)?;
         Ok(Overlay {
             hwnd,
             gfx,
@@ -387,7 +406,39 @@ impl Overlay {
             fade_timer: false,
             default_color: 0,
             default_width: 3.0,
+            dimmer,
+            last_open: OpenTimings::default(),
+            last_size: (0, 0),
         })
+    }
+
+    /// The size of the last capture (the virtual screen).
+    pub fn screen_size(&self) -> (i32, i32) {
+        self.last_size
+    }
+
+    /// Benchmark: shows `selection` with the toolbars and draws a frame;
+    /// returns the drawing time, before the wait for vsync.
+    pub fn bench_frame(&mut self, selection: Rect) -> Result<std::time::Duration> {
+        if let Some(session) = &mut self.session {
+            session.selection = Some(selection.intersect(session.capture.bounds()));
+            session.drag = Drag::None;
+        }
+        self.render()
+    }
+
+    /// Benchmark: adds a line across `area`, so the export draws.
+    pub fn bench_annotate(&mut self, area: Rect) {
+        if let Some(session) = &mut self.session {
+            let mut line = Shape::new(
+                Tool::Line,
+                COLORS[0].0,
+                3.0,
+                PointF::center(area.left + 10, area.top + 10),
+            );
+            line.extend(PointF::center(area.right - 10, area.bottom - 10), false);
+            session.history.push(line);
+        }
     }
 
     /// The color and stroke width the next captures start with.
@@ -408,9 +459,20 @@ impl Overlay {
             return Ok(());
         }
         let started = Instant::now();
-        let capture = capture::capture_screen()?;
+        if let Some(dimmer) = &self.dimmer {
+            dimmer.show();
+        }
+        let capture = match capture::capture_screen() {
+            Ok(capture) => capture,
+            Err(err) => {
+                self.hide_dimmer();
+                return Err(err);
+            }
+        };
         let captured = started.elapsed();
         let bitmap = self.upload(&capture)?;
+        let uploaded = started.elapsed();
+        self.last_size = (capture.width, capture.height);
         let mut cursor = POINT::default();
         // SAFETY: plain query.
         unsafe {
@@ -451,11 +513,17 @@ impl Overlay {
         }
         if let Err(err) = self
             .resize_buffers(width as u32, height as u32)
-            .and_then(|()| self.render())
+            .and_then(|()| self.render().map(|_| ()))
         {
             self.close();
             return Err(err);
         }
+        let rendered = started.elapsed();
+        self.last_open = OpenTimings {
+            capture: captured,
+            upload: uploaded - captured,
+            first_frame: rendered - uploaded,
+        };
         // SAFETY: uncloaks and activates this thread's window; the posted
         // message prepares the Acrylic backdrop once the overlay is shown.
         unsafe {
@@ -465,6 +533,8 @@ impl Overlay {
             SetCursor(Some(self.cursors.cross));
             let _ = PostMessageW(Some(self.hwnd), WM_APP_PREPARE, WPARAM(0), LPARAM(0));
         }
+        // The overlay now covers it, with the same dimming.
+        self.hide_dimmer();
         log!(
             "capture {width}x{height}: screen {:.1} ms, overlay shown after {:.1} ms",
             captured.as_secs_f64() * 1000.0,
@@ -498,8 +568,26 @@ impl Overlay {
         Some(image.map(|image| (image, session.capture.time)))
     }
 
+    fn hide_dimmer(&self) {
+        if let Some(dimmer) = &self.dimmer {
+            dimmer.hide();
+        }
+    }
+
+    /// Benchmark: dims the screen as the shortcut does first; `false`
+    /// when this Windows version cannot exclude it from capture.
+    pub fn bench_dim(&self, on: bool) -> bool {
+        match &self.dimmer {
+            Some(dimmer) if on => dimmer.show(),
+            Some(dimmer) => dimmer.hide(),
+            None => return false,
+        }
+        true
+    }
+
     /// Hides the overlay and frees the capture.
     pub fn close(&mut self) {
+        self.hide_dimmer();
         if self.session.take().is_none() {
             return;
         }
@@ -514,6 +602,8 @@ impl Overlay {
         if let Err(err) = self.resize_buffers(IDLE_BUFFER, IDLE_BUFFER) {
             log!("swap chain not shrunk: {err}");
         }
+        self.gfx.release_caches();
+        win::trim_working_set();
     }
 
     /// Uploads the captured pixels for drawing.
@@ -625,17 +715,19 @@ impl Overlay {
         }
     }
 
-    /// Draws and presents one frame.
-    fn render(&mut self) -> Result<()> {
+    /// Draws and presents one frame; returns the drawing time, before the
+    /// wait for vsync.
+    fn render(&mut self) -> Result<std::time::Duration> {
         let visible = match &self.session {
             Some(session) => session.toolbars().is_some(),
-            None => return Ok(()),
+            None => return Ok(std::time::Duration::ZERO),
         };
+        let started = Instant::now();
         let fade = self.fade(visible);
         let target = self.target()?;
         let ctx = self.gfx.ctx.clone();
         let Some(session) = &self.session else {
-            return Ok(());
+            return Ok(std::time::Duration::ZERO);
         };
         let bars = session.toolbars();
         self.painter
@@ -658,7 +750,9 @@ impl Overlay {
             let ended = ctx.EndDraw(None, None);
             drawn?;
             ended?;
-            self.swap_chain.Present(1, DXGI_PRESENT(0)).ok()
+            let elapsed = started.elapsed();
+            self.swap_chain.Present(1, DXGI_PRESENT(0)).ok()?;
+            Ok(elapsed)
         }
     }
 

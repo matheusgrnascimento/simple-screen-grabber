@@ -5,6 +5,20 @@ use windows::Win32::Foundation::{CloseHandle, HANDLE, HINSTANCE};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, DestroyMenu, HICON, HMENU};
 
+/// Gives the pages of the working set back to Windows: they stay in memory
+/// (on the standby list) and come back on use, but stop counting against
+/// this process while it is idle.
+pub fn trim_working_set() {
+    // SAFETY: (usize::MAX, usize::MAX) asks to trim the current process.
+    unsafe {
+        let _ = windows::Win32::System::Threading::SetProcessWorkingSetSize(
+            windows::Win32::System::Threading::GetCurrentProcess(),
+            usize::MAX,
+            usize::MAX,
+        );
+    }
+}
+
 /// A null-terminated UTF-16 copy of `s`.
 pub fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain([0]).collect()
