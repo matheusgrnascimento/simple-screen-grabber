@@ -4,8 +4,13 @@
 #![windows_subsystem = "windows"]
 
 mod app;
+mod capture;
+mod fluent;
+mod geometry;
+mod gfx;
 mod hotkey;
 mod log;
+mod overlay;
 mod tray;
 mod win;
 

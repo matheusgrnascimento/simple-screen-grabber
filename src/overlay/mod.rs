@@ -1,0 +1,647 @@
+//! The capture overlay: one borderless, topmost window over the virtual
+//! screen that shows the frozen screen and lets the user select an area.
+//!
+//! The window, the devices and the swap chain are created at startup and
+//! kept hidden (and cloaked). A capture grabs the screen, uploads it to the
+//! GPU once, renders the first frame while still cloaked, then uncloaks:
+//! the overlay appears complete, with no flash. Closing hides it and
+//! releases the capture, the GPU bitmap and the swap chain buffers.
+
+mod layout;
+mod render;
+pub mod selection;
+
+use std::time::Instant;
+
+use windows::core::{w, Result, BOOL, PCWSTR};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Graphics::Direct2D::Common::{
+    D2D1_ALPHA_MODE_IGNORE, D2D1_PIXEL_FORMAT, D2D_SIZE_U,
+};
+use windows::Win32::Graphics::Direct2D::{
+    ID2D1Bitmap1, D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_NONE,
+    D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1, D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE,
+};
+use windows::Win32::Graphics::Dwm::{
+    DwmSetWindowAttribute, DWMWA_CLOAK, DWMWA_TRANSITIONS_FORCEDISABLED,
+    DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DWM_WINDOW_CORNER_PREFERENCE,
+};
+use windows::Win32::Graphics::Dxgi::Common::{
+    DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DESC,
+};
+use windows::Win32::Graphics::Dxgi::{
+    IDXGISurface, IDXGISwapChain1, DXGI_MWA_NO_ALT_ENTER, DXGI_PRESENT, DXGI_SCALING_NONE,
+    DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_EFFECT_FLIP_DISCARD,
+    DXGI_USAGE_RENDER_TARGET_OUTPUT,
+};
+use windows::Win32::Graphics::Gdi::{InvalidateRect, ValidateRect};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RIGHT,
+    VK_SHIFT, VK_UP,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    CreateWindowExW, GetCursorPos, GetSystemMetrics, LoadCursorW, RegisterClassExW, SetCursor,
+    SetForegroundWindow, SetWindowPos, ShowWindow, CS_DBLCLKS, HCURSOR, HTCLIENT, HWND_TOPMOST,
+    IDC_ARROW, IDC_CROSS, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE,
+    SM_CXDRAG, SM_CYDRAG, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, WA_INACTIVE, WM_ACTIVATE,
+    WM_CAPTURECHANGED, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR, WNDCLASSEXW, WNDPROC, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP,
+};
+
+use self::selection::Handle;
+use crate::capture::{self, Capture};
+use crate::fluent::Palette;
+use crate::geometry::{Point, Rect};
+use crate::gfx::Gfx;
+use crate::log;
+use crate::win;
+
+const CLASS: PCWSTR = w!("SimpleScreenGrabber.Overlay");
+/// Swap chain size while hidden: the buffers are freed, not the chain.
+const IDLE_BUFFER: u32 = 8;
+
+/// What the overlay asks the app to do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Event {
+    Close,
+}
+
+/// The result of handling a window message.
+#[derive(Default)]
+pub struct Reply {
+    pub result: Option<LRESULT>,
+    pub event: Option<Event>,
+}
+
+impl Reply {
+    fn handled(value: isize) -> Reply {
+        Reply {
+            result: Some(LRESULT(value)),
+            event: None,
+        }
+    }
+
+    fn event(event: Event) -> Reply {
+        Reply {
+            result: Some(LRESULT(0)),
+            event: Some(event),
+        }
+    }
+}
+
+/// What the left mouse button is doing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Drag {
+    None,
+    /// Pressed outside the selection; becomes a new selection once the
+    /// mouse moves past the drag threshold.
+    Pending {
+        anchor: Point,
+    },
+    Creating {
+        anchor: Point,
+    },
+    Moving {
+        start: Rect,
+        grab: Point,
+    },
+    Resizing {
+        start: Rect,
+        handle: Handle,
+        grab: Point,
+    },
+}
+
+/// One capture, from the shortcut until the overlay closes.
+pub struct Session {
+    capture: Capture,
+    bitmap: ID2D1Bitmap1,
+    selection: Option<Rect>,
+    drag: Drag,
+    mouse: Point,
+    hover: Option<Handle>,
+}
+
+impl Session {
+    /// The display scale of the monitor under a point.
+    fn scale_at(&self, x: i32, y: i32) -> f32 {
+        self.capture.monitor_at(Point::new(x, y)).scale
+    }
+
+    fn handle_at(&self, p: Point) -> Option<Handle> {
+        let sel = self.selection?;
+        let scale = self.scale_at(p.x, p.y);
+        let diameter = 2.0 * render::metrics::HANDLE_RADIUS * self.scale_at(sel.left, sel.top);
+        let handles = selection::visible_handles(sel, diameter);
+        selection::hit_handle(sel, handles, p, render::metrics::HANDLE_HIT * scale)
+    }
+}
+
+struct Cursors {
+    arrow: HCURSOR,
+    cross: HCURSOR,
+    move_all: HCURSOR,
+    nwse: HCURSOR,
+    nesw: HCURSOR,
+    we: HCURSOR,
+    ns: HCURSOR,
+}
+
+impl Cursors {
+    fn load() -> Result<Cursors> {
+        // SAFETY: loads shared system cursors, which are never destroyed.
+        let load = |id: PCWSTR| unsafe { LoadCursorW(None, id) };
+        Ok(Cursors {
+            arrow: load(IDC_ARROW)?,
+            cross: load(IDC_CROSS)?,
+            move_all: load(IDC_SIZEALL)?,
+            nwse: load(IDC_SIZENWSE)?,
+            nesw: load(IDC_SIZENESW)?,
+            we: load(IDC_SIZEWE)?,
+            ns: load(IDC_SIZENS)?,
+        })
+    }
+}
+
+pub struct Overlay {
+    hwnd: HWND,
+    gfx: Gfx,
+    swap_chain: IDXGISwapChain1,
+    target: Option<ID2D1Bitmap1>,
+    painter: render::Painter,
+    palette: Palette,
+    cursors: Cursors,
+    session: Option<Session>,
+}
+
+impl Overlay {
+    /// Creates the hidden overlay window and its graphics resources.
+    pub fn new(window_proc: WNDPROC, palette: Palette) -> Result<Overlay> {
+        let gfx = Gfx::new()?;
+        let class = WNDCLASSEXW {
+            cbSize: size_of::<WNDCLASSEXW>() as u32,
+            style: CS_DBLCLKS,
+            lpfnWndProc: window_proc,
+            hInstance: win::instance(),
+            lpszClassName: CLASS,
+            ..Default::default()
+        };
+        // SAFETY: registers the class and creates a hidden popup window of
+        // this thread; the DWM attributes are plain values.
+        let hwnd = unsafe {
+            RegisterClassExW(&class);
+            let hwnd = CreateWindowExW(
+                WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+                CLASS,
+                w!("Simple Screen Grabber"),
+                WS_POPUP,
+                0,
+                0,
+                1,
+                1,
+                None,
+                None,
+                Some(win::instance()),
+                None,
+            )?;
+            set_dwm_bool(hwnd, DWMWA_CLOAK.0 as u32, true);
+            set_dwm_bool(hwnd, DWMWA_TRANSITIONS_FORCEDISABLED.0 as u32, true);
+            let corners: DWM_WINDOW_CORNER_PREFERENCE = DWMWCP_DONOTROUND;
+            // Windows 10 has no rounded corners: ignore the error there.
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_WINDOW_CORNER_PREFERENCE,
+                (&corners as *const DWM_WINDOW_CORNER_PREFERENCE).cast(),
+                size_of::<DWM_WINDOW_CORNER_PREFERENCE>() as u32,
+            );
+            hwnd
+        };
+        let desc = DXGI_SWAP_CHAIN_DESC1 {
+            Width: IDLE_BUFFER,
+            Height: IDLE_BUFFER,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
+            BufferCount: 2,
+            // Never stretched: the buffers always match the window.
+            Scaling: DXGI_SCALING_NONE,
+            SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
+            AlphaMode: DXGI_ALPHA_MODE_IGNORE,
+            ..Default::default()
+        };
+        // SAFETY: COM calls on the devices created above, for this window.
+        let swap_chain = unsafe {
+            let chain = gfx
+                .dxgi_factory
+                .CreateSwapChainForHwnd(&gfx.d3d, hwnd, &desc, None, None)?;
+            gfx.dxgi_factory
+                .MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER)?;
+            gfx.ctx
+                .SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+            chain
+        };
+        let painter = render::Painter::new(&gfx.ctx, &gfx.dwrite)?;
+        Ok(Overlay {
+            hwnd,
+            gfx,
+            swap_chain,
+            target: None,
+            painter,
+            palette,
+            cursors: Cursors::load()?,
+            session: None,
+        })
+    }
+
+    /// Captures the screen and shows the overlay.
+    pub fn open(&mut self) -> Result<()> {
+        if self.session.is_some() {
+            return Ok(());
+        }
+        let started = Instant::now();
+        let capture = capture::capture_screen()?;
+        let captured = started.elapsed();
+        let bitmap = self.upload(&capture)?;
+        let mut cursor = POINT::default();
+        // SAFETY: plain query.
+        unsafe {
+            let _ = GetCursorPos(&mut cursor);
+        }
+        let mouse = Point::new(cursor.x - capture.origin.x, cursor.y - capture.origin.y);
+        let (origin, width, height) = (capture.origin, capture.width, capture.height);
+        self.session = Some(Session {
+            capture,
+            bitmap,
+            selection: None,
+            drag: Drag::None,
+            mouse,
+            hover: None,
+        });
+        // SAFETY: positions and shows this thread's window while it is
+        // still cloaked, so nothing appears yet.
+        unsafe {
+            SetWindowPos(
+                self.hwnd,
+                Some(HWND_TOPMOST),
+                origin.x,
+                origin.y,
+                width,
+                height,
+                SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            )?;
+        }
+        if let Err(err) = self
+            .resize_buffers(width as u32, height as u32)
+            .and_then(|()| self.render())
+        {
+            self.close();
+            return Err(err);
+        }
+        // SAFETY: uncloaks and activates this thread's window.
+        unsafe {
+            set_dwm_bool(self.hwnd, DWMWA_CLOAK.0 as u32, false);
+            let _ = SetForegroundWindow(self.hwnd);
+            let _ = SetFocus(Some(self.hwnd));
+            SetCursor(Some(self.cursors.cross));
+        }
+        log!(
+            "capture {width}x{height}: screen {:.1} ms, overlay shown after {:.1} ms",
+            captured.as_secs_f64() * 1000.0,
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+        Ok(())
+    }
+
+    /// Hides the overlay and frees the capture.
+    pub fn close(&mut self) {
+        if self.session.take().is_none() {
+            return;
+        }
+        // SAFETY: hides this thread's window; releases the mouse if held.
+        unsafe {
+            set_dwm_bool(self.hwnd, DWMWA_CLOAK.0 as u32, true);
+            let _ = ShowWindow(self.hwnd, SW_HIDE);
+            let _ = ReleaseCapture();
+        }
+        if let Err(err) = self.resize_buffers(IDLE_BUFFER, IDLE_BUFFER) {
+            log!("swap chain not shrunk: {err}");
+        }
+    }
+
+    /// Uploads the captured pixels to the GPU.
+    fn upload(&self, capture: &Capture) -> Result<ID2D1Bitmap1> {
+        let props = D2D1_BITMAP_PROPERTIES1 {
+            pixelFormat: D2D1_PIXEL_FORMAT {
+                format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                alphaMode: D2D1_ALPHA_MODE_IGNORE,
+            },
+            dpiX: 96.0,
+            dpiY: 96.0,
+            bitmapOptions: D2D1_BITMAP_OPTIONS_NONE,
+            ..Default::default()
+        };
+        let size = D2D_SIZE_U {
+            width: capture.width as u32,
+            height: capture.height as u32,
+        };
+        // SAFETY: the pixel slice holds height rows of `stride` bytes and
+        // outlives the call, which copies it.
+        unsafe {
+            self.gfx.ctx.CreateBitmap(
+                size,
+                Some(capture.pixels().as_ptr().cast()),
+                capture.stride() as u32,
+                &props,
+            )
+        }
+    }
+
+    fn resize_buffers(&mut self, width: u32, height: u32) -> Result<()> {
+        self.target = None;
+        // SAFETY: the device context no longer references the back buffer,
+        // so the swap chain can reallocate it.
+        unsafe {
+            self.gfx.ctx.SetTarget(None);
+            self.swap_chain.ResizeBuffers(
+                0,
+                width,
+                height,
+                DXGI_FORMAT_UNKNOWN,
+                DXGI_SWAP_CHAIN_FLAG(0),
+            )
+        }
+    }
+
+    /// The Direct2D bitmap of the swap chain's back buffer.
+    fn target(&mut self) -> Result<ID2D1Bitmap1> {
+        if let Some(target) = &self.target {
+            return Ok(target.clone());
+        }
+        let props = D2D1_BITMAP_PROPERTIES1 {
+            pixelFormat: D2D1_PIXEL_FORMAT {
+                format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                alphaMode: D2D1_ALPHA_MODE_IGNORE,
+            },
+            dpiX: 96.0,
+            dpiY: 96.0,
+            bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+            ..Default::default()
+        };
+        // SAFETY: wraps the swap chain's back buffer for Direct2D.
+        let target = unsafe {
+            let surface: IDXGISurface = self.swap_chain.GetBuffer(0)?;
+            self.gfx
+                .ctx
+                .CreateBitmapFromDxgiSurface(&surface, Some(&props))?
+        };
+        self.target = Some(target.clone());
+        Ok(target)
+    }
+
+    /// Draws and presents one frame.
+    fn render(&mut self) -> Result<()> {
+        if self.session.is_none() {
+            return Ok(());
+        }
+        let target = self.target()?;
+        let ctx = self.gfx.ctx.clone();
+        // SAFETY: one BeginDraw/EndDraw pair on this thread's context.
+        unsafe {
+            ctx.SetTarget(&target);
+            ctx.BeginDraw();
+        }
+        let drawn = match &self.session {
+            Some(session) => self.painter.frame(&ctx, session, &self.palette),
+            None => Ok(()),
+        };
+        // SAFETY: closes the BeginDraw above, then presents with vsync.
+        unsafe {
+            let ended = ctx.EndDraw(None, None);
+            drawn?;
+            ended?;
+            self.swap_chain.Present(1, DXGI_PRESENT(0)).ok()
+        }
+    }
+
+    fn invalidate(&self) {
+        if self.session.is_some() {
+            // SAFETY: invalidates this thread's window; WM_PAINT renders.
+            unsafe {
+                let _ = InvalidateRect(Some(self.hwnd), None, false);
+            }
+        }
+    }
+
+    /// Handles a message of the overlay window.
+    pub fn message(&mut self, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Reply {
+        match msg {
+            WM_PAINT => {
+                // SAFETY: validates this thread's window.
+                unsafe {
+                    let _ = ValidateRect(Some(self.hwnd), None);
+                }
+                if let Err(err) = self.render() {
+                    log!("render failed: {err}");
+                    return Reply::event(Event::Close);
+                }
+                Reply::handled(0)
+            }
+            WM_ERASEBKGND => Reply::handled(1),
+            WM_SETCURSOR if win::low_word(lparam.0 as usize) == HTCLIENT => {
+                self.update_cursor();
+                Reply::handled(1)
+            }
+            WM_MOUSEMOVE => {
+                self.mouse_move(point(lparam));
+                Reply::handled(0)
+            }
+            WM_LBUTTONDOWN => {
+                self.button_down(point(lparam));
+                Reply::handled(0)
+            }
+            WM_LBUTTONUP => {
+                self.button_up(point(lparam));
+                Reply::handled(0)
+            }
+            WM_CAPTURECHANGED => {
+                if lparam.0 != self.hwnd.0 as isize {
+                    self.end_drag();
+                }
+                Reply::handled(0)
+            }
+            WM_KEYDOWN => self.key_down(wparam.0 as u16),
+            WM_ACTIVATE if win::low_word(wparam.0) == WA_INACTIVE => Reply {
+                result: None,
+                event: self.session.as_ref().map(|_| Event::Close),
+            },
+            WM_DISPLAYCHANGE => Reply::event(Event::Close),
+            // The window spans monitors on purpose: ignore DPI changes.
+            WM_DPICHANGED => Reply::handled(0),
+            _ => Reply::default(),
+        }
+    }
+
+    fn update_cursor(&self) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        let handle = match session.drag {
+            Drag::Resizing { handle, .. } => Some(handle),
+            Drag::None => session.handle_at(session.mouse),
+            _ => None,
+        };
+        let moving = matches!(session.drag, Drag::Moving { .. })
+            || (session.drag == Drag::None
+                && session.selection.is_some_and(|s| s.contains(session.mouse)));
+        let cursor = match handle {
+            Some(h) if h.is_nwse() => self.cursors.nwse,
+            Some(h) if h.is_nesw() => self.cursors.nesw,
+            Some(h) if h.is_horizontal() => self.cursors.we,
+            Some(_) => self.cursors.ns,
+            None if moving => self.cursors.move_all,
+            None if matches!(session.drag, Drag::Creating { .. } | Drag::Pending { .. }) => {
+                self.cursors.cross
+            }
+            None => self.cursors.cross,
+        };
+        let _ = self.cursors.arrow;
+        // SAFETY: sets a shared system cursor.
+        unsafe { SetCursor(Some(cursor)) };
+    }
+
+    fn button_down(&mut self, p: Point) {
+        let Some(session) = &mut self.session else {
+            return;
+        };
+        session.mouse = p;
+        session.drag = match (session.handle_at(p), session.selection) {
+            (Some(handle), Some(start)) => Drag::Resizing {
+                start,
+                handle,
+                grab: p,
+            },
+            (None, Some(start)) if start.contains(p) => Drag::Moving { start, grab: p },
+            _ => Drag::Pending { anchor: p },
+        };
+        // SAFETY: captures the mouse for this thread's window.
+        unsafe { SetCapture(self.hwnd) };
+        self.invalidate();
+    }
+
+    fn mouse_move(&mut self, p: Point) {
+        let Some(session) = &mut self.session else {
+            return;
+        };
+        session.mouse = p;
+        let bounds = session.capture.bounds();
+        let clamped = bounds.clamp(p);
+        match session.drag {
+            Drag::None => {
+                let hover = session.handle_at(p);
+                if hover != session.hover {
+                    session.hover = hover;
+                    self.invalidate();
+                }
+                return;
+            }
+            Drag::Pending { anchor } => {
+                // SAFETY: plain system metric queries.
+                let (dx, dy) =
+                    unsafe { (GetSystemMetrics(SM_CXDRAG), GetSystemMetrics(SM_CYDRAG)) };
+                if (p.x - anchor.x).abs() < dx && (p.y - anchor.y).abs() < dy {
+                    return;
+                }
+                let anchor = bounds.clamp(anchor);
+                session.drag = Drag::Creating { anchor };
+                session.selection = Some(Rect::spanning(anchor, clamped));
+            }
+            Drag::Creating { anchor } => session.selection = Some(Rect::spanning(anchor, clamped)),
+            Drag::Moving { start, grab } => {
+                session.selection =
+                    Some(selection::moved(start, p.x - grab.x, p.y - grab.y, bounds));
+            }
+            Drag::Resizing {
+                start,
+                handle,
+                grab,
+            } => {
+                session.selection = Some(selection::resized(
+                    start,
+                    handle,
+                    p.x - grab.x,
+                    p.y - grab.y,
+                    bounds,
+                ));
+            }
+        }
+        self.invalidate();
+    }
+
+    fn button_up(&mut self, p: Point) {
+        if let Some(session) = &mut self.session {
+            session.mouse = p;
+        }
+        // SAFETY: releases the mouse captured in button_down.
+        unsafe {
+            let _ = ReleaseCapture();
+        }
+        self.end_drag();
+    }
+
+    fn end_drag(&mut self) {
+        if let Some(session) = &mut self.session {
+            if session.drag != Drag::None {
+                session.drag = Drag::None;
+                session.hover = session.handle_at(session.mouse);
+                self.invalidate();
+            }
+        }
+    }
+
+    fn key_down(&mut self, key: u16) -> Reply {
+        if key == VK_ESCAPE.0 {
+            return Reply::event(Event::Close);
+        }
+        let Some(session) = &mut self.session else {
+            return Reply::default();
+        };
+        // SAFETY: reads the keyboard state of this thread.
+        let shift = unsafe { GetKeyState(i32::from(VK_SHIFT.0)) } < 0;
+        let step = if shift { 10 } else { 1 };
+        let (dx, dy) = match key {
+            k if k == VK_LEFT.0 => (-step, 0),
+            k if k == VK_RIGHT.0 => (step, 0),
+            k if k == VK_UP.0 => (0, -step),
+            k if k == VK_DOWN.0 => (0, step),
+            _ => return Reply::default(),
+        };
+        if let (Some(sel), Drag::None) = (session.selection, session.drag) {
+            session.selection = Some(selection::moved(sel, dx, dy, session.capture.bounds()));
+            self.invalidate();
+        }
+        Reply::handled(0)
+    }
+}
+
+/// The client point of a mouse message.
+fn point(lparam: LPARAM) -> Point {
+    Point::new(win::x_of(lparam.0), win::y_of(lparam.0))
+}
+
+/// Sets a boolean DWM window attribute.
+fn set_dwm_bool(hwnd: HWND, attribute: u32, value: bool) {
+    let value = BOOL::from(value);
+    // SAFETY: passes a BOOL of the size the attribute expects.
+    unsafe {
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            windows::Win32::Graphics::Dwm::DWMWINDOWATTRIBUTE(attribute as i32),
+            (&value as *const BOOL).cast(),
+            size_of::<BOOL>() as u32,
+        );
+    }
+}

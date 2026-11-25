@@ -23,8 +23,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_DISPLAYCHANGE, WM_HOTKEY, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
+use crate::fluent::Palette;
 use crate::hotkey::{self, Hotkey};
 use crate::log;
+use crate::overlay::{self, Overlay};
 use crate::tray::{self, MenuItem, Tray};
 use crate::win::{self, Handle};
 
@@ -66,6 +68,7 @@ fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
 struct App {
     host: HWND,
     tray: Tray,
+    overlay: Overlay,
     hotkey: Hotkey,
     registration: Option<hotkey::Registration>,
     taskbar_created: u32,
@@ -85,9 +88,11 @@ pub fn run(options: Options) -> Result<()> {
     let taskbar_created = unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) };
     let hotkey = Hotkey::DEFAULT;
     let tray = Tray::new(host, WM_APP_TRAY, &tooltip(hotkey))?;
+    let overlay = Overlay::new(Some(overlay_proc), Palette::load())?;
     let mut app = App {
         host,
         tray,
+        overlay,
         hotkey,
         registration: None,
         taskbar_created,
@@ -213,7 +218,24 @@ extern "system" fn host_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARA
     }
 }
 
+extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    match with_app(|app| app.overlay_message(msg, wparam, lparam)) {
+        Some(Some(result)) => result,
+        // SAFETY: default handling for this thread's window.
+        _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    }
+}
+
 impl App {
+    fn overlay_message(&mut self, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
+        let reply = self.overlay.message(msg, wparam, lparam);
+        match reply.event {
+            Some(overlay::Event::Close) => self.overlay.close(),
+            None => {}
+        }
+        reply.result
+    }
+
     fn host_message(&mut self, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
         match msg {
             WM_HOTKEY if wparam.0 == hotkey::CAPTURE_ID as usize => self.capture(),
@@ -279,6 +301,10 @@ impl App {
     }
 
     fn capture(&mut self) {
-        log!("capture requested");
+        if let Err(err) = self.overlay.open() {
+            log!("capture failed: {err}");
+            self.tray
+                .notify("Couldn't capture the screen", &err.message());
+        }
     }
 }
