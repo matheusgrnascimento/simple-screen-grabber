@@ -586,6 +586,7 @@ impl App {
             default_folder: paths::screenshots_folder(),
             color: self.config.color,
             width: self.config.stroke_width.round() as i64,
+            include_cursor: self.config.include_cursor,
             autostart: !self.location.portable && startup::is_enabled(),
             portable: self.location.portable,
         }

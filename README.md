@@ -13,7 +13,7 @@ Simple native Windows app for screenshots: press a shortcut, select an area, ann
 - with nothing selected, saving or copying takes the monitor under the mouse;
 - Windows 11 look: toolbars, color flyout, size label and tooltips in Acrylic made from the frozen screen, elevation shadows, Segoe UI Variable and Segoe Fluent Icons (Segoe MDL2 Assets on Windows 10), the accent color, and the light/dark theme, high contrast, transparency and animation settings of Windows, followed live;
 - tray icon with Capture, Open screenshots folder, Settings, Start with Windows and Exit; the tray menu follows the dark theme;
-- a settings window (shortcut, screenshots folder, default color and stroke width, Start with Windows), saved to a `config.toml` file that can also be edited by hand;
+- a settings window (shortcut, screenshots folder, default color and stroke width, include the mouse pointer, Start with Windows), saved to a `config.toml` file that can also be edited by hand;
 - a portable mode, an MSI installer, and a `--bench` mode that measures the app on your machine.
 
 ## Shortcuts
@@ -48,7 +48,7 @@ Every toolbar button has a tooltip with its shortcut. Launching the app again wh
 | `save_folder` | `''` | Empty: the Windows Screenshots folder. Use single quotes for paths (`'D:\Shots'`); `%VARIABLES%` expand and relative paths start at the settings folder |
 | `color` | `"blue"` | `red`, `orange`, `yellow`, `green`, `blue`, `purple`, `black` or `white` |
 | `stroke_width` | `3` | 1 to 20 pixels at 100% display scale |
-| `include_cursor` | `false` | `true` draws the mouse pointer on the capture (config file only) |
+| `include_cursor` | `false` | `true` draws the mouse pointer on the capture |
 
 **Portable mode**: with a file named `portable` next to `Simple Screen Grabber.exe`, the settings stay in that folder and nothing is written anywhere else (Start with Windows is then not available).
 

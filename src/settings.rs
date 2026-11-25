@@ -81,7 +81,7 @@ const PAD: f32 = 24.0;
 const CARDS_TOP: f32 = 76.0;
 const CARD_HEIGHT: f32 = 68.0;
 const CARD_GAP: f32 = 4.0;
-const CARD_COUNT: usize = 5;
+const CARD_COUNT: usize = 6;
 const LINK_TOP: f32 = CARDS_TOP + CARD_COUNT as f32 * (CARD_HEIGHT + CARD_GAP) + 8.0;
 const HEIGHT: f32 = LINK_TOP + 20.0 + PAD;
 /// The right edge of the controls in the cards.
@@ -99,6 +99,7 @@ pub struct Values {
     pub default_folder: Option<PathBuf>,
     pub color: usize,
     pub width: i64,
+    pub include_cursor: bool,
     pub autostart: bool,
     /// Portable mode: Start with Windows is not offered.
     pub portable: bool,
@@ -128,6 +129,7 @@ pub enum Control {
     Swatch(usize),
     Thinner,
     Thicker,
+    Cursor,
     Autostart,
     OpenFile,
 }
@@ -259,8 +261,12 @@ impl Form {
             Rect::new(RIGHT - 32.0, middle(3) - 16.0, 32.0, 32.0),
         ));
         list.push((
-            Control::Autostart,
+            Control::Cursor,
             Rect::new(RIGHT - 84.0, middle(4) - 16.0, 84.0, 32.0),
+        ));
+        list.push((
+            Control::Autostart,
+            Rect::new(RIGHT - 84.0, middle(5) - 16.0, 84.0, 32.0),
         ));
         list.push((Control::OpenFile, Rect::new(PAD, LINK_TOP, 160.0, 20.0)));
         list
@@ -320,6 +326,7 @@ impl Form {
             Control::Swatch(_) => None,
             Control::Thinner => Some(Action::Change(Change::StrokeWidth(v.width - 1))),
             Control::Thicker => Some(Action::Change(Change::StrokeWidth(v.width + 1))),
+            Control::Cursor => Some(Action::Change(Change::IncludeCursor(!v.include_cursor))),
             Control::Autostart => Some(Action::ToggleAutostart),
             Control::OpenFile => Some(Action::OpenFile),
         }
@@ -1246,6 +1253,11 @@ fn draw(p: &Painter, form: &Form, c: &Colors, mica: bool) {
             None,
         ),
         (
+            "Include the mouse pointer",
+            "Draws the pointer on the screenshot".into(),
+            None,
+        ),
+        (
             "Start with Windows",
             if v.portable {
                 "Not available in portable mode".into()
@@ -1262,6 +1274,7 @@ fn draw(p: &Painter, form: &Form, c: &Colors, mica: bool) {
             .map_or(RIGHT, |r| r.left),
         form.rect(Control::Swatch(0)).map_or(RIGHT, |r| r.left),
         form.rect(Control::Thinner).map_or(RIGHT, |r| r.left),
+        form.rect(Control::Cursor).map_or(RIGHT, |r| r.left),
         form.rect(Control::Autostart).map_or(RIGHT, |r| r.left),
     ];
     for (i, (title, description, tint)) in rows.iter().enumerate() {
@@ -1269,7 +1282,7 @@ fn draw(p: &Painter, form: &Form, c: &Colors, mica: bool) {
         p.fill(r, c.card, 4.0);
         p.stroke(r, c.card_stroke, 4.0, 1.0);
         let width = lefts[i] - 16.0 - (r.left + 16.0);
-        let disabled = i == 4 && v.portable;
+        let disabled = i == 5 && v.portable;
         let title_color = if disabled { c.disabled } else { c.text };
         p.text(
             title,
@@ -1353,41 +1366,13 @@ fn draw(p: &Painter, form: &Form, c: &Colors, mica: bool) {
         p.text(&format!("{} px", v.width), &f.centered, r, c.text);
     }
 
-    // Start with Windows toggle: "On"/"Off", then the switch.
+    // The switches: "On"/"Off", then the switch.
+    if let Some(r) = form.rect(Control::Cursor) {
+        toggle(p, c, r, state(form, Control::Cursor), v.include_cursor);
+    }
     if let Some(r) = form.rect(Control::Autostart) {
-        let s = state(form, Control::Autostart);
         let on = v.autostart && !v.portable;
-        let track = Rect::new(r.right() - 40.0, r.top + 6.0, 40.0, 20.0);
-        let (cy, knob) = (track.top + 10.0, if s == State::Hover { 7.0 } else { 6.0 });
-        let label_color = if s == State::Disabled {
-            c.disabled
-        } else {
-            c.text
-        };
-        p.text(
-            if on { "On" } else { "Off" },
-            &f.body,
-            Rect::new(r.left, r.top, track.left - 12.0 - r.left, r.height),
-            label_color,
-        );
-        if s == State::Disabled {
-            p.stroke(track, c.disabled, 10.0, 1.0);
-            p.disc(track.left + 10.0, cy, 6.0, c.disabled);
-        } else if on {
-            let fill = if s == State::Hover {
-                c.accent_hover
-            } else {
-                c.accent
-            };
-            p.fill(track, fill, 10.0);
-            p.disc(track.right() - 10.0, cy, knob, c.on_accent);
-        } else {
-            if s == State::Hover {
-                p.fill(track, c.control_hover, 10.0);
-            }
-            p.stroke(track, c.strong_stroke, 10.0, 1.0);
-            p.disc(track.left + 10.0, cy, knob, c.strong_stroke);
-        }
+        toggle(p, c, r, state(form, Control::Autostart), on);
     }
 
     // Link to the file, for the options not shown here.
@@ -1410,6 +1395,42 @@ fn draw(p: &Painter, form: &Form, c: &Colors, mica: bool) {
             };
             p.stroke(r.inset(-5.0), c.text, radius, 2.0);
         }
+    }
+}
+
+/// An "On"/"Off" label and a switch, right-aligned in the rectangle.
+fn toggle(p: &Painter, c: &Colors, r: Rect, s: State, on: bool) {
+    let f = p.formats;
+    let track = Rect::new(r.right() - 40.0, r.top + 6.0, 40.0, 20.0);
+    let (cy, knob) = (track.top + 10.0, if s == State::Hover { 7.0 } else { 6.0 });
+    let label_color = if s == State::Disabled {
+        c.disabled
+    } else {
+        c.text
+    };
+    p.text(
+        if on { "On" } else { "Off" },
+        &f.body,
+        Rect::new(r.left, r.top, track.left - 12.0 - r.left, r.height),
+        label_color,
+    );
+    if s == State::Disabled {
+        p.stroke(track, c.disabled, 10.0, 1.0);
+        p.disc(track.left + 10.0, cy, 6.0, c.disabled);
+    } else if on {
+        let fill = if s == State::Hover {
+            c.accent_hover
+        } else {
+            c.accent
+        };
+        p.fill(track, fill, 10.0);
+        p.disc(track.right() - 10.0, cy, knob, c.on_accent);
+    } else {
+        if s == State::Hover {
+            p.fill(track, c.control_hover, 10.0);
+        }
+        p.stroke(track, c.strong_stroke, 10.0, 1.0);
+        p.disc(track.left + 10.0, cy, knob, c.strong_stroke);
     }
 }
 
@@ -1453,6 +1474,7 @@ mod tests {
             default_folder: Some(PathBuf::from(r"C:\Users\me\Pictures\Screenshots")),
             color: 4,
             width: 3,
+            include_cursor: false,
             autostart: false,
             portable: false,
         }
@@ -1515,6 +1537,10 @@ mod tests {
         assert_eq!(
             click(&mut form, Control::Thinner),
             Some(Action::Change(Change::StrokeWidth(2)))
+        );
+        assert_eq!(
+            click(&mut form, Control::Cursor),
+            Some(Action::Change(Change::IncludeCursor(true)))
         );
         assert_eq!(click(&mut form, Control::Browse), Some(Action::Browse));
         assert_eq!(

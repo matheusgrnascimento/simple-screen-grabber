@@ -167,6 +167,7 @@ pub enum Change {
     SaveFolder(Option<PathBuf>),
     Color(usize),
     StrokeWidth(i64),
+    IncludeCursor(bool),
 }
 
 impl Change {
@@ -180,6 +181,7 @@ impl Change {
                 let name = COLORS[(*index).min(COLORS.len() - 1)].1.to_lowercase();
                 ("color", format!("\"{name}\""))
             }
+            Change::IncludeCursor(on) => ("include_cursor", on.to_string()),
             Change::StrokeWidth(width) => (
                 "stroke_width",
                 (*width).clamp(MIN_STROKE, MAX_STROKE).to_string(),
@@ -445,6 +447,16 @@ mod tests {
         let (config, problems) = parse("include_cursor = 1", Path::new("C:\\"));
         assert!(!config.include_cursor);
         assert!(problems[0].contains("true or false"), "{problems:?}");
+    }
+
+    #[test]
+    fn the_cursor_change_writes_true_or_false() {
+        let text = set_value(
+            &template(),
+            "include_cursor",
+            &Change::IncludeCursor(true).entry().1,
+        );
+        assert!(parse_ok(&text).include_cursor);
     }
 
     #[test]
