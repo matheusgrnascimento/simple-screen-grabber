@@ -742,7 +742,7 @@ impl Settings {
             let hwnd = CreateWindowExW(
                 WINDOW_EX_STYLE(0),
                 CLASS,
-                w!("Simple Screen Grabber settings"),
+                w!("Settings - Simple Screen Grabber"),
                 style,
                 work.left,
                 work.top,
