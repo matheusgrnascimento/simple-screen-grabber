@@ -2,7 +2,7 @@
 //! rights), update in place, and uninstall.
 //!
 //! Installed state:
-//! - `%LOCALAPPDATA%\Programs\Simple Screen Grabber\simple-screen-grabber.exe`,
+//! - `%LOCALAPPDATA%\Programs\Simple Screen Grabber\Simple Screen Grabber.exe`,
 //!   and `uninstall.exe` (a copy of this setup) next to it;
 //! - a Start menu shortcut;
 //! - the entry in Settings > Apps
@@ -34,7 +34,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 pub const APP_NAME: &str = "Simple Screen Grabber";
-const EXE: &str = "simple-screen-grabber.exe";
+const EXE: &str = "Simple Screen Grabber.exe";
+/// The executable name of earlier versions, removed on upgrade.
+const LEGACY_EXE: &str = "simple-screen-grabber.exe";
 const UNINSTALLER: &str = "uninstall.exe";
 const PUBLISHER: &str = "Matheus Nascimento";
 const URL: &str = "https://github.com/matheusgrnascimento/simple-screen-grabber";
@@ -265,6 +267,7 @@ pub fn install(payload: &[u8], version: &str, options: Options, progress: &mut d
     std::fs::create_dir_all(&folder).map_err(os_error)?;
     let exe = folder.join(EXE);
     write_replacing(&exe, payload)?;
+    let _ = std::fs::remove_file(folder.join(LEGACY_EXE));
     let me = std::env::current_exe().map_err(os_error)?;
     let uninstaller = folder.join(UNINSTALLER);
     if me != uninstaller {

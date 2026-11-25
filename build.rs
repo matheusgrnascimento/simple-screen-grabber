@@ -6,5 +6,5 @@ mod resources;
 
 fn main() {
     let root = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("set by cargo"));
-    resources::embed(&root, "Simple Screen Grabber", "simple-screen-grabber");
+    resources::embed(&root, "Simple Screen Grabber", "Simple Screen Grabber");
 }

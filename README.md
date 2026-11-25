@@ -38,7 +38,7 @@ Every toolbar button has a tooltip with its shortcut. Launching the app again wh
 
 ## Settings
 
-**Settings...** in the tray menu (or `simple-screen-grabber.exe --settings`) opens the settings window. To change the shortcut, click it and press the new keys (Esc cancels); a shortcut owned by another app is refused. Every change applies at once and is written to `config.toml`, rewriting only that setting's line, so comments stay.
+**Settings...** in the tray menu (or `"Simple Screen Grabber.exe" --settings`) opens the settings window. To change the shortcut, click it and press the new keys (Esc cancels); a shortcut owned by another app is refused. Every change applies at once and is written to `config.toml`, rewriting only that setting's line, so comments stay.
 
 **Edit the settings file**, at the bottom of the window, opens `config.toml`, writing it from a commented template the first time. It lives in `%APPDATA%\simple-screen-grabber`, or next to the executable in portable mode. Changes made by hand apply when the file is saved; invalid values keep the defaults and a notification names the line.
 
@@ -49,7 +49,7 @@ Every toolbar button has a tooltip with its shortcut. Launching the app again wh
 | `color` | `"blue"` | `red`, `orange`, `yellow`, `green`, `blue`, `purple`, `black` or `white` |
 | `stroke_width` | `3` | 1 to 20 pixels at 100% display scale |
 
-**Portable mode**: with a file named `portable` next to `simple-screen-grabber.exe`, the settings stay in that folder and nothing is written anywhere else (Start with Windows is then not available).
+**Portable mode**: with a file named `portable` next to `Simple Screen Grabber.exe`, the settings stay in that folder and nothing is written anywhere else (Start with Windows is then not available).
 
 `SIMPLE_SCREEN_GRABBER_THEME` set to `light` or `dark` forces a theme, to check both without changing Windows.
 

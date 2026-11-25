@@ -46,7 +46,7 @@ foreach ($dir in $stage, $portable) {
     if (Test-Path $dir) { Remove-Item $dir -Recurse -Force }
     New-Item -ItemType Directory -Path $dir -Force | Out-Null
 }
-Copy-Item "target\release\simple-screen-grabber.exe" $stage
+Copy-Item "target\release\simple-screen-grabber.exe" "$stage\Simple Screen Grabber.exe"
 Copy-Item "assets\icon.ico" $stage
 Copy-Item "LICENSE" "$stage\LICENSE.txt"
 
@@ -62,7 +62,7 @@ wix build "installer\Package.wxs" -arch x64 -ext WixToolset.UI.wixext -ext WixTo
 if ($LASTEXITCODE -ne 0) { throw "wix build failed." }
 
 Write-Host "==> Building portable package" -ForegroundColor Cyan
-Copy-Item "target\release\simple-screen-grabber.exe" $portable
+Copy-Item "target\release\simple-screen-grabber.exe" "$portable\Simple Screen Grabber.exe"
 Copy-Item "LICENSE" "$portable\LICENSE.txt"
 New-Item -ItemType File -Path "$portable\portable" | Out-Null
 if (Test-Path $zip) { Remove-Item $zip }

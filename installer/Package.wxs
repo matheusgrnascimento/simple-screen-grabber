@@ -39,7 +39,7 @@
     <!-- The app stays in the tray: close it before files are replaced or
          removed (it exits on WM_CLOSE). -->
     <util:CloseApplication Id="CloseRunningApp"
-                           Target="simple-screen-grabber.exe"
+                           Target="Simple Screen Grabber.exe"
                            CloseMessage="yes"
                            RebootPrompt="no"
                            Timeout="5" />
@@ -82,7 +82,7 @@
 
     <Feature Id="Main" Title="Simple Screen Grabber" Level="1">
       <Component Directory="INSTALLFOLDER">
-        <File Id="MainExe" Source="$(StageDir)\simple-screen-grabber.exe" KeyPath="yes">
+        <File Id="MainExe" Source="$(StageDir)\Simple Screen Grabber.exe" KeyPath="yes">
           <Shortcut Id="StartMenuShortcut"
                     Name="Simple Screen Grabber"
                     Description="Select an area of the screen, annotate it, save or copy it"
@@ -107,7 +107,7 @@
                        Key="Software\Microsoft\Windows\CurrentVersion\Run"
                        Name="SimpleScreenGrabber"
                        Type="string"
-                       Value="&quot;[INSTALLFOLDER]simple-screen-grabber.exe&quot; --autostart"
+                       Value="&quot;[INSTALLFOLDER]Simple Screen Grabber.exe&quot; --autostart"
                        KeyPath="yes" />
       </Component>
     </Feature>
