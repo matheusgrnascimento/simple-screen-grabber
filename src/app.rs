@@ -32,9 +32,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     FindWindowW, GetWindowThreadProcessId, KillTimer, MsgWaitForMultipleObjectsEx, PeekMessageW,
     PostMessageW, PostQuitMessage, RegisterClassExW, RegisterWindowMessageW, SetTimer,
     TranslateMessage, MSG, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT, SW_SHOWNORMAL, WM_APP,
-    WM_CONTEXTMENU, WM_DESTROYCLIPBOARD, WM_DISPLAYCHANGE, WM_ENDSESSION, WM_HOTKEY, WM_QUIT,
-    WM_RENDERALLFORMATS, WM_RENDERFORMAT, WM_SETTINGCHANGE, WM_SYSCOLORCHANGE, WM_THEMECHANGED,
-    WM_TIMER, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_POPUP,
+    WM_CLOSE, WM_CONTEXTMENU, WM_DESTROYCLIPBOARD, WM_DISPLAYCHANGE, WM_ENDSESSION, WM_HOTKEY,
+    WM_QUERYENDSESSION, WM_QUIT, WM_RENDERALLFORMATS, WM_RENDERFORMAT, WM_SETTINGCHANGE,
+    WM_SYSCOLORCHANGE, WM_THEMECHANGED, WM_TIMER, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
 use crate::capture::Timestamp;
@@ -59,6 +59,10 @@ const WM_APP_SAVED: u32 = WM_APP + 3;
 const HOST_CLASS: PCWSTR = w!("SimpleScreenGrabber.Host");
 const INSTANCE_MUTEX: PCWSTR = w!("Local\\SimpleScreenGrabber.Instance");
 const APP_NAME: &str = "Simple Screen Grabber";
+
+/// `WM_ENDSESSION` flag: the app is closed by the Restart Manager (an
+/// installer), not by a sign-out.
+const ENDSESSION_CLOSEAPP: u32 = 0x0000_0001;
 
 /// The keyboard variant of `NIN_SELECT` (Enter or Space on the icon).
 const NIN_KEYSELECT: u32 = NIN_SELECT | NINF_KEY;
@@ -368,7 +372,17 @@ impl App {
             WM_RENDERFORMAT => self.clipboard.render(wparam.0 as u32),
             WM_RENDERALLFORMATS => self.clipboard.render_all(self.host),
             WM_DESTROYCLIPBOARD => self.clipboard.release(),
-            WM_ENDSESSION if wparam.0 != 0 => self.clipboard.render_all(self.host),
+            // The installer (and the Restart Manager) close the app.
+            // SAFETY: ends the message loop of this thread.
+            WM_CLOSE => unsafe { PostQuitMessage(0) },
+            WM_QUERYENDSESSION => return Some(LRESULT(1)),
+            WM_ENDSESSION if wparam.0 != 0 => {
+                self.clipboard.render_all(self.host);
+                if lparam.0 as u32 & ENDSESSION_CLOSEAPP != 0 {
+                    // SAFETY: as above.
+                    unsafe { PostQuitMessage(0) };
+                }
+            }
             WM_DISPLAYCHANGE => self.tray.refresh_icon(),
             WM_TIMER if wparam.0 == CONFIG_TIMER => {
                 // SAFETY: stops this thread's window timer.

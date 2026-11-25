@@ -26,14 +26,20 @@ use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
 fn main() {
     let mut options = app::Options::default();
     let mut bench = false;
+    let mut set_autostart = None;
     for arg in std::env::args().skip(1) {
         match arg.as_str() {
             "--autostart" => options.autostart = true,
             "--bench" => bench = true,
+            // Used by the installer, and by scripts.
+            "--enable-autostart" => set_autostart = Some(true),
+            "--disable-autostart" => set_autostart = Some(false),
             _ => {}
         }
     }
-    let result = if bench {
+    let result = if let Some(enabled) = set_autostart {
+        startup::set_enabled(enabled)
+    } else if bench {
         bench::run()
     } else {
         app::run(options)
