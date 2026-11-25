@@ -198,7 +198,7 @@ Two outputs from the same build.
 
 WiX Toolset 5, as in the other projects (`installer/Package.wxs`, `installer/build-installer.ps1`).
 
-- Installs to `Program Files\Simple Screen Grabber`, adds a Start menu shortcut, removable from Settings > Apps.
+- Installs for all users to `Program Files\Simple Screen Grabber` by default, or for the current user only to `%LocalAppData%\Programs\Simple Screen Grabber` (the Advanced button of the first page), adds a Start menu shortcut, removable from Settings > Apps.
 - `MajorUpgrade` installs over older versions and refuses downgrades.
 - C runtime linked statically (no Visual C++ Redistributable needed).
 - Closes the running app before upgrading or uninstalling (`WixToolset.Util`), since it stays in the tray.

@@ -87,7 +87,7 @@ powershell -ExecutionPolicy Bypass -File .\installer\build-installer.ps1
 
 This builds in `dist\`:
 
-- `SimpleScreenGrabber-<version>-x64.msi`: installs to `Program Files\Simple Screen Grabber` with a Start menu shortcut, upgrades in place, closes the running app before replacing it, and offers to open it at the end. Start with Windows is on by default (`START_WITH_WINDOWS=0` turns it off in a silent install), stays off on upgrade if you turned it off, and is removed on uninstall;
+- `SimpleScreenGrabber-<version>-x64.msi`: installs for all users to `Program Files\Simple Screen Grabber` by default (the Advanced button of the first page switches to the current user only, `%LocalAppData%\Programs\Simple Screen Grabber`, without an administrator prompt), with a Start menu shortcut, upgrades in place, closes the running app before replacing it, and offers to open it at the end. Start with Windows is on by default (`START_WITH_WINDOWS=0` turns it off in a silent install), stays off on upgrade if you turned it off, and is removed on uninstall;
 - `SimpleScreenGrabber-<version>-portable.zip`: the executable, the license and the `portable` marker.
 
 ## How it works

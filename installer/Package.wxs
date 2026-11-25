@@ -19,6 +19,26 @@
     <Property Id="ARPURLINFOABOUT" Value="https://github.com/matheusgrnascimento/simple-screen-grabber" />
     <WixVariable Id="WixUILicenseRtf" Value="$(StageDir)\license.rtf" />
 
+    <!-- The Advanced button of the first page lets the user choose between
+         all users (the default: Program Files, asks for administrator
+         rights) and the current user only (%LocalAppData%\Programs, no
+         prompt). WixUI_Advanced would use the 32-bit Program Files and
+         %LocalAppData%\Apps, so both folders are set again after its
+         defaults. -->
+    <Property Id="ApplicationFolderName" Value="Simple Screen Grabber" />
+    <Property Id="WixAppFolder" Value="WixPerMachineFolder" />
+    <CustomAction Id="SetPerUserFolder"
+                  Property="WixPerUserFolder"
+                  Value="[LocalAppDataFolder]Programs\[ApplicationFolderName]"
+                  Execute="immediate" />
+    <CustomAction Id="SetPerMachineFolder"
+                  Property="WixPerMachineFolder"
+                  Value="[ProgramFiles64Folder][ApplicationFolderName]"
+                  Execute="immediate" />
+    <InstallUISequence>
+      <Custom Action="SetPerUserFolder" After="WixSetDefaultPerMachineFolder" />
+      <Custom Action="SetPerMachineFolder" After="SetPerUserFolder" />
+    </InstallUISequence>
     <!-- Start with Windows: on by default (START_WITH_WINDOWS=0 turns it
          off in a silent install). An upgrade keeps it off if the user
          turned it off from the tray menu. -->
@@ -53,7 +73,7 @@
                   DllEntry="WixShellExec"
                   Impersonate="yes" />
     <UI>
-      <ui:WixUI Id="WixUI_Minimal" />
+      <ui:WixUI Id="WixUI_Advanced" />
       <Publish Dialog="ExitDialog"
                Control="Finish"
                Event="DoAction"
@@ -70,29 +90,31 @@
                   Execute="immediate"
                   Return="ignore" />
     <InstallExecuteSequence>
+      <Custom Action="SetPerUserFolder" After="WixSetDefaultPerMachineFolder" />
+      <Custom Action="SetPerMachineFolder" After="SetPerUserFolder" />
       <Custom Action="DisableAutostart"
               Before="RemoveFiles"
               Condition="REMOVE = &quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
     </InstallExecuteSequence>
 
     <StandardDirectory Id="ProgramFiles64Folder">
-      <Directory Id="INSTALLFOLDER" Name="Simple Screen Grabber" />
+      <Directory Id="APPLICATIONFOLDER" Name="Simple Screen Grabber" />
     </StandardDirectory>
     <StandardDirectory Id="ProgramMenuFolder" />
 
     <Feature Id="Main" Title="Simple Screen Grabber" Level="1">
-      <Component Directory="INSTALLFOLDER">
+      <Component Directory="APPLICATIONFOLDER">
         <File Id="MainExe" Source="$(StageDir)\Simple Screen Grabber.exe" KeyPath="yes">
           <Shortcut Id="StartMenuShortcut"
                     Name="Simple Screen Grabber"
                     Description="Select an area of the screen, annotate it, save or copy it"
                     Directory="ProgramMenuFolder"
-                    WorkingDirectory="INSTALLFOLDER"
+                    WorkingDirectory="APPLICATIONFOLDER"
                     Icon="AppIcon.ico"
                     Advertise="yes" />
         </File>
       </Component>
-      <Component Directory="INSTALLFOLDER">
+      <Component Directory="APPLICATIONFOLDER">
         <File Id="LicenseFile" Source="$(StageDir)\LICENSE.txt" KeyPath="yes" />
       </Component>
     </Feature>
@@ -102,12 +124,12 @@
          with Windows after the user turned it off in the tray menu. -->
     <Feature Id="Autostart" Title="Start with Windows" Level="1">
       <Level Value="0" Condition="START_WITH_WINDOWS &lt;&gt; 1" />
-      <Component Id="Autostart" Directory="INSTALLFOLDER">
+      <Component Id="Autostart" Directory="APPLICATIONFOLDER">
         <RegistryValue Root="HKCU"
                        Key="Software\Microsoft\Windows\CurrentVersion\Run"
                        Name="SimpleScreenGrabber"
                        Type="string"
-                       Value="&quot;[INSTALLFOLDER]Simple Screen Grabber.exe&quot; --autostart"
+                       Value="&quot;[APPLICATIONFOLDER]Simple Screen Grabber.exe&quot; --autostart"
                        KeyPath="yes" />
       </Component>
     </Feature>
