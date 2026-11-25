@@ -8,6 +8,9 @@ repository = "https://github.com/matheusgrnascimento/simple-screen-grabber"
 readme = "README.md"
 publish = false
 
+[workspace]
+members = ["tools/genicon"]
+
 [profile.release]
 opt-level = 3
 lto = "fat"
