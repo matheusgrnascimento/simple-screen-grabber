@@ -14,19 +14,23 @@ use std::path::{Path, PathBuf};
 
 use windows::core::{w, Error, Interface, Result, HRESULT, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, WPARAM};
-use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH};
+use windows::Win32::Storage::FileSystem::{
+    MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+};
 use windows::Win32::System::ApplicationInstallationAndServicing::MsiEnumRelatedProductsW;
-use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, IPersistFile, CLSCTX_INPROC_SERVER};
+use windows::Win32::System::Com::{
+    CoCreateInstance, CoTaskMemFree, IPersistFile, CLSCTX_INPROC_SERVER,
+};
 use windows::Win32::System::Registry::{
-    RegDeleteKeyValueW, RegDeleteTreeW, RegGetValueW, RegSetKeyValueW, HKEY_CURRENT_USER, REG_DWORD,
-    REG_SZ, RRF_RT_REG_SZ,
+    RegDeleteKeyValueW, RegDeleteTreeW, RegGetValueW, RegSetKeyValueW, HKEY_CURRENT_USER,
+    REG_DWORD, REG_SZ, RRF_RT_REG_SZ,
 };
 use windows::Win32::System::Threading::{
     OpenProcess, WaitForSingleObject, INFINITE, PROCESS_SYNCHRONIZE,
 };
 use windows::Win32::UI::Shell::{
-    IShellLinkW, SHGetKnownFolderPath, ShellExecuteExW, ShellLink, FOLDERID_LocalAppData,
-    FOLDERID_Programs, FOLDERID_RoamingAppData, KF_FLAG_CREATE, SEE_MASK_NOCLOSEPROCESS,
+    FOLDERID_LocalAppData, FOLDERID_Programs, FOLDERID_RoamingAppData, IShellLinkW,
+    SHGetKnownFolderPath, ShellExecuteExW, ShellLink, KF_FLAG_CREATE, SEE_MASK_NOCLOSEPROCESS,
     SHELLEXECUTEINFOW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -40,7 +44,8 @@ const LEGACY_EXE: &str = "simple-screen-grabber.exe";
 const UNINSTALLER: &str = "uninstall.exe";
 const PUBLISHER: &str = "Matheus Nascimento";
 const URL: &str = "https://github.com/matheusgrnascimento/simple-screen-grabber";
-const UNINSTALL_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\SimpleScreenGrabber";
+const UNINSTALL_KEY: &str =
+    r"Software\Microsoft\Windows\CurrentVersion\Uninstall\SimpleScreenGrabber";
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const RUN_VALUE: &str = "SimpleScreenGrabber";
 /// The app's hidden window, to close it before files are replaced.
@@ -73,7 +78,9 @@ fn known_folder(id: &windows::core::GUID) -> Result<PathBuf> {
 
 /// Where the app is installed.
 pub fn install_folder() -> Result<PathBuf> {
-    Ok(known_folder(&FOLDERID_LocalAppData)?.join("Programs").join(APP_NAME))
+    Ok(known_folder(&FOLDERID_LocalAppData)?
+        .join("Programs")
+        .join(APP_NAME))
 }
 
 fn shortcut_path() -> Result<PathBuf> {
@@ -146,11 +153,21 @@ pub fn autostart_enabled() -> bool {
 
 fn set_autostart(exe: Option<&Path>) -> Result<()> {
     match exe {
-        Some(exe) => set_string(RUN_KEY, RUN_VALUE, &format!("\"{}\" --autostart", exe.display())),
+        Some(exe) => set_string(
+            RUN_KEY,
+            RUN_VALUE,
+            &format!("\"{}\" --autostart", exe.display()),
+        ),
         None => {
             let (key, value) = (wide(RUN_KEY), wide(RUN_VALUE));
             // SAFETY: deletes one value; a missing value is fine.
-            let _ = unsafe { RegDeleteKeyValueW(HKEY_CURRENT_USER, PCWSTR(key.as_ptr()), PCWSTR(value.as_ptr())) };
+            let _ = unsafe {
+                RegDeleteKeyValueW(
+                    HKEY_CURRENT_USER,
+                    PCWSTR(key.as_ptr()),
+                    PCWSTR(value.as_ptr()),
+                )
+            };
             Ok(())
         }
     }
@@ -179,7 +196,8 @@ pub fn close_running_app() {
 fn remove_old_msi() -> Result<()> {
     let mut code = [0u16; 39];
     // SAFETY: the buffer holds a product code (38 characters and a null).
-    let found = unsafe { MsiEnumRelatedProductsW(MSI_UPGRADE_CODE, None, 0, PWSTR(code.as_mut_ptr())) };
+    let found =
+        unsafe { MsiEnumRelatedProductsW(MSI_UPGRADE_CODE, None, 0, PWSTR(code.as_mut_ptr())) };
     if found != 0 {
         return Ok(());
     }
@@ -220,7 +238,8 @@ fn create_shortcut(target: &Path, folder: &Path) -> Result<()> {
         link.SetWorkingDirectory(PCWSTR(folder_w.as_ptr()))?;
         link.SetDescription(PCWSTR(description.as_ptr()))?;
         link.SetIconLocation(PCWSTR(target_w.as_ptr()), 0)?;
-        link.cast::<IPersistFile>()?.Save(PCWSTR(path_w.as_ptr()), true)
+        link.cast::<IPersistFile>()?
+            .Save(PCWSTR(path_w.as_ptr()), true)
     }
 }
 
@@ -254,9 +273,17 @@ pub struct Options {
 }
 
 /// Installs or updates the app. `progress` gets a fraction and a status.
-pub fn install(payload: &[u8], version: &str, options: Options, progress: &mut dyn FnMut(f32, &str)) -> Result<PathBuf> {
+pub fn install(
+    payload: &[u8],
+    version: &str,
+    options: Options,
+    progress: &mut dyn FnMut(f32, &str),
+) -> Result<PathBuf> {
     if payload.is_empty() {
-        return Err(Error::new(HRESULT(-1), "This setup was built without the app."));
+        return Err(Error::new(
+            HRESULT(-1),
+            "This setup was built without the app.",
+        ));
     }
     progress(0.1, "Closing Simple Screen Grabber");
     close_running_app();
@@ -305,7 +332,9 @@ pub fn install(payload: &[u8], version: &str, options: Options, progress: &mut d
 
 /// Starts the installed app, as the user who runs the setup.
 pub fn launch(exe: &Path) {
-    let _ = std::process::Command::new(exe).current_dir(exe.parent().unwrap_or(Path::new("."))).spawn();
+    let _ = std::process::Command::new(exe)
+        .current_dir(exe.parent().unwrap_or(Path::new(".")))
+        .spawn();
 }
 
 /// Removes the app. Screenshots always stay; the settings only stay if
@@ -347,7 +376,10 @@ pub fn relaunch_from_temp(args: &[String]) -> bool {
     if !me.starts_with(&folder) {
         return false;
     }
-    let copy = std::env::temp_dir().join(format!("SimpleScreenGrabber-uninstall-{}.exe", std::process::id()));
+    let copy = std::env::temp_dir().join(format!(
+        "SimpleScreenGrabber-uninstall-{}.exe",
+        std::process::id()
+    ));
     if std::fs::copy(&me, &copy).is_err() {
         return false;
     }

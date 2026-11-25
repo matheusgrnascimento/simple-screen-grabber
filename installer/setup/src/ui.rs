@@ -34,22 +34,23 @@ use windows::Win32::Graphics::Imaging::{
 };
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_BINARY, RRF_RT_REG_DWORD};
+use windows::Win32::System::Registry::{
+    RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_BINARY, RRF_RT_REG_DWORD,
+};
 use windows::Win32::UI::Controls::{MARGINS, WM_MOUSELEAVE};
 use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_ESCAPE, VK_RETURN,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect,
-    GetMessageW, GetSystemMetrics, LoadCursorW, LoadImageW, MessageBoxW, PostMessageW,
-    PostQuitMessage, RegisterClassExW, SetCursor, SetWindowPos, ShowWindow, TranslateMessage,
-    CW_USEDEFAULT, HICON, HTCLIENT, IDC_ARROW, IDC_HAND, IMAGE_ICON, LR_DEFAULTCOLOR,
-    MB_ICONINFORMATION, MB_OK, MSG, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER,
-    SW_SHOWNORMAL, WINDOW_EX_STYLE, WM_APP, WM_CLOSE, WM_DESTROY, WM_DPICHANGED,
-    WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WM_PAINT, WM_SETCURSOR, WM_SIZE, WNDCLASSEXW, WS_CAPTION, WS_MINIMIZEBOX, WS_OVERLAPPED,
-    WS_SYSMENU,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, GetMessageW,
+    GetSystemMetrics, LoadCursorW, LoadImageW, MessageBoxW, PostMessageW, PostQuitMessage,
+    RegisterClassExW, SetCursor, SetWindowPos, ShowWindow, TranslateMessage, CW_USEDEFAULT, HICON,
+    HTCLIENT, IDC_ARROW, IDC_HAND, IMAGE_ICON, LR_DEFAULTCOLOR, MB_ICONINFORMATION, MB_OK, MSG,
+    SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOWNORMAL, WINDOW_EX_STYLE, WM_APP,
+    WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR, WM_SIZE, WNDCLASSEXW, WS_CAPTION, WS_MINIMIZEBOX,
+    WS_OVERLAPPED, WS_SYSMENU,
 };
 
 use crate::install::{self, Options, PostTarget, APP_NAME};
@@ -120,7 +121,15 @@ fn registry_dword(key: PCWSTR, value: PCWSTR) -> Option<u32> {
     let mut size = 4u32;
     // SAFETY: a 4-byte buffer.
     let status = unsafe {
-        RegGetValueW(HKEY_CURRENT_USER, key, value, RRF_RT_REG_DWORD, None, Some((&mut data as *mut u32).cast()), Some(&mut size))
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            key,
+            value,
+            RRF_RT_REG_DWORD,
+            None,
+            Some((&mut data as *mut u32).cast()),
+            Some(&mut size),
+        )
     };
     status.is_ok().then_some(data)
 }
@@ -140,7 +149,14 @@ fn accent_shade(index: usize) -> Option<Rgba> {
             Some(&mut size),
         )
     };
-    (status.is_ok() && size >= 32).then(|| Rgba(data[index * 4], data[index * 4 + 1], data[index * 4 + 2], 0xFF))
+    (status.is_ok() && size >= 32).then(|| {
+        Rgba(
+            data[index * 4],
+            data[index * 4 + 1],
+            data[index * 4 + 2],
+            0xFF,
+        )
+    })
 }
 
 impl Colors {
@@ -205,7 +221,11 @@ struct Ui {
     colors: Colors,
     factory: ID2D1Factory,
     dwrite: IDWriteFactory,
-    target: Option<(ID2D1HwndRenderTarget, ID2D1SolidColorBrush, Option<ID2D1Bitmap>)>,
+    target: Option<(
+        ID2D1HwndRenderTarget,
+        ID2D1SolidColorBrush,
+        Option<ID2D1Bitmap>,
+    )>,
     title: IDWriteTextFormat,
     body: IDWriteTextFormat,
     caption: IDWriteTextFormat,
@@ -238,17 +258,37 @@ fn font_exists(dwrite: &IDWriteFactory, family: PCWSTR) -> bool {
     let mut collection = None;
     // SAFETY: plain queries.
     unsafe {
-        if dwrite.GetSystemFontCollection(&mut collection, false).is_err() {
+        if dwrite
+            .GetSystemFontCollection(&mut collection, false)
+            .is_err()
+        {
             return false;
         }
         let (mut index, mut found) = (0, BOOL(0));
-        collection.is_some_and(|c| c.FindFamilyName(family, &mut index, &mut found).is_ok() && found.as_bool())
+        collection.is_some_and(|c| {
+            c.FindFamilyName(family, &mut index, &mut found).is_ok() && found.as_bool()
+        })
     }
 }
 
-fn format(dwrite: &IDWriteFactory, family: PCWSTR, weight: DWRITE_FONT_WEIGHT, size: f32) -> Result<IDWriteTextFormat> {
+fn format(
+    dwrite: &IDWriteFactory,
+    family: PCWSTR,
+    weight: DWRITE_FONT_WEIGHT,
+    size: f32,
+) -> Result<IDWriteTextFormat> {
     // SAFETY: constant arguments.
-    unsafe { dwrite.CreateTextFormat(family, None, weight, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, size, w!("en-us")) }
+    unsafe {
+        dwrite.CreateTextFormat(
+            family,
+            None,
+            weight,
+            DWRITE_FONT_STYLE_NORMAL,
+            DWRITE_FONT_STRETCH_NORMAL,
+            size,
+            w!("en-us"),
+        )
+    }
 }
 
 impl Ui {
@@ -270,16 +310,26 @@ impl Ui {
             Control::Primary => Some(rect(WIDTH - PAD - 120.0, button_y, 120.0, 32.0)),
             Control::Secondary if ready => Some(rect(WIDTH - PAD - 248.0, button_y, 120.0, 32.0)),
             Control::First if ready => Some(rect(PAD, 156.0, WIDTH - 2.0 * PAD, 32.0)),
-            Control::Second if ready && self.mode == Mode::Install => Some(rect(PAD, 188.0, WIDTH - 2.0 * PAD, 32.0)),
-            Control::License if ready && self.mode == Mode::Install => Some(rect(PAD, 224.0, 260.0, 20.0)),
+            Control::Second if ready && self.mode == Mode::Install => {
+                Some(rect(PAD, 188.0, WIDTH - 2.0 * PAD, 32.0))
+            }
+            Control::License if ready && self.mode == Mode::Install => {
+                Some(rect(PAD, 224.0, 260.0, 20.0))
+            }
             _ => None,
         }
     }
 
     fn hit(&self, x: f32, y: f32) -> Option<Control> {
-        [Control::Primary, Control::Secondary, Control::First, Control::Second, Control::License]
-            .into_iter()
-            .find(|c| self.control_rect(*c).is_some_and(|r| contains(&r, x, y)))
+        [
+            Control::Primary,
+            Control::Secondary,
+            Control::First,
+            Control::Second,
+            Control::License,
+        ]
+        .into_iter()
+        .find(|c| self.control_rect(*c).is_some_and(|r| contains(&r, x, y)))
     }
 
     fn scale(&self) -> f32 {
@@ -308,7 +358,14 @@ impl Ui {
                 let text: Vec<u16> = LICENSE.encode_utf16().chain([0]).collect();
                 // SAFETY: a modal message box; nothing is borrowed across it
                 // that a nested message would need (it is skipped).
-                unsafe { MessageBoxW(Some(self.hwnd), PCWSTR(text.as_ptr()), w!("MIT License"), MB_OK | MB_ICONINFORMATION) };
+                unsafe {
+                    MessageBoxW(
+                        Some(self.hwnd),
+                        PCWSTR(text.as_ptr()),
+                        w!("MIT License"),
+                        MB_OK | MB_ICONINFORMATION,
+                    )
+                };
             }
         }
         self.invalidate();
@@ -325,24 +382,49 @@ impl Ui {
         std::thread::spawn(move || {
             let target = target;
             // SAFETY: COM for this thread.
-            let _ = unsafe { windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED) };
+            let _ = unsafe {
+                windows::Win32::System::Com::CoInitializeEx(
+                    None,
+                    windows::Win32::System::Com::COINIT_APARTMENTTHREADED,
+                )
+            };
             let mut progress = |fraction: f32, status: &str| {
                 let boxed = Box::into_raw(Box::new((fraction, status.to_string())));
                 // SAFETY: the window takes ownership of the box.
                 unsafe {
-                    if PostMessageW(Some(target.0), WM_APP_PROGRESS, WPARAM(0), LPARAM(boxed as isize)).is_err() {
+                    if PostMessageW(
+                        Some(target.0),
+                        WM_APP_PROGRESS,
+                        WPARAM(0),
+                        LPARAM(boxed as isize),
+                    )
+                    .is_err()
+                    {
                         drop(Box::from_raw(boxed));
                     }
                 }
             };
             let result = match mode {
-                Mode::Install => install::install(payload, version, Options { autostart: first }, &mut progress).map(Some),
+                Mode::Install => install::install(
+                    payload,
+                    version,
+                    Options { autostart: first },
+                    &mut progress,
+                )
+                .map(Some),
                 Mode::Uninstall => install::uninstall(first, &mut progress).map(|()| None),
             };
             let boxed = Box::into_raw(Box::new(result.map_err(|e| e.message())));
             // SAFETY: as above.
             unsafe {
-                if PostMessageW(Some(target.0), WM_APP_FINISHED, WPARAM(0), LPARAM(boxed as isize)).is_err() {
+                if PostMessageW(
+                    Some(target.0),
+                    WM_APP_FINISHED,
+                    WPARAM(0),
+                    LPARAM(boxed as isize),
+                )
+                .is_err()
+                {
                     drop(Box::from_raw(boxed));
                 }
             }
@@ -387,7 +469,14 @@ impl Ui {
             // SAFETY: drawing with resources of this target.
             unsafe {
                 brush.SetColor(&color.d2d());
-                target.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: r, radiusX: radius, radiusY: radius }, brush);
+                target.FillRoundedRectangle(
+                    &D2D1_ROUNDED_RECT {
+                        rect: r,
+                        radiusX: radius,
+                        radiusY: radius,
+                    },
+                    brush,
+                );
             }
         };
         let text = |s: &str, f: &IDWriteTextFormat, r: D2D_RECT_F, color: Rgba| {
@@ -395,28 +484,57 @@ impl Ui {
             // SAFETY: drawing with resources of this target.
             unsafe {
                 brush.SetColor(&color.d2d());
-                target.DrawText(&wide, f, &r, brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+                target.DrawText(
+                    &wide,
+                    f,
+                    &r,
+                    brush,
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                    DWRITE_MEASURING_MODE_NATURAL,
+                );
             }
         };
         // SAFETY: one BeginDraw/EndDraw pair on this thread's target.
         unsafe {
             target.BeginDraw();
-            let background = if self.mica { Rgba(0, 0, 0, 0) } else { c.background };
+            let background = if self.mica {
+                Rgba(0, 0, 0, 0)
+            } else {
+                c.background
+            };
             target.Clear(Some(&background.d2d()));
             if let Some(icon) = icon {
-                target.DrawBitmap(icon, Some(&rect(PAD, PAD, 48.0, 48.0)), 1.0, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None);
+                target.DrawBitmap(
+                    icon,
+                    Some(&rect(PAD, PAD, 48.0, 48.0)),
+                    1.0,
+                    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                    None,
+                );
             }
         }
         let heading = match self.mode {
             Mode::Install => APP_NAME.to_string(),
             Mode::Uninstall => format!("Uninstall {APP_NAME}"),
         };
-        text(&heading, &self.title, rect(PAD + 64.0, PAD + 2.0, 360.0, 30.0), c.text);
+        text(
+            &heading,
+            &self.title,
+            rect(PAD + 64.0, PAD + 2.0, 360.0, 30.0),
+            c.text,
+        );
         let sub = match (&self.installed, self.mode) {
-            (Some(old), Mode::Install) if old != self.version => format!("Version {old} \u{2192} {}", self.version),
+            (Some(old), Mode::Install) if old != self.version => {
+                format!("Version {old} \u{2192} {}", self.version)
+            }
             _ => format!("Version {}", self.version),
         };
-        text(&sub, &self.caption, rect(PAD + 64.0, PAD + 30.0, 360.0, 20.0), c.secondary);
+        text(
+            &sub,
+            &self.caption,
+            rect(PAD + 64.0, PAD + 30.0, 360.0, 20.0),
+            c.secondary,
+        );
 
         let message = match (&self.phase, self.mode) {
             (Phase::Ready, Mode::Install) if self.installed.is_some() => {
@@ -433,21 +551,39 @@ impl Ui {
             (Phase::Done, Mode::Uninstall) => "Simple Screen Grabber was removed.".to_string(),
             (Phase::Failed(err), _) => format!("Something went wrong: {err}"),
         };
-        text(&message, &self.body, rect(PAD, 100.0, WIDTH - 2.0 * PAD, 48.0), c.text);
+        text(
+            &message,
+            &self.body,
+            rect(PAD, 100.0, WIDTH - 2.0 * PAD, 48.0),
+            c.text,
+        );
 
         // Checkboxes, the license link, or the progress bar.
         match &self.phase {
             Phase::Ready => {
                 let boxes: &[(Control, bool, &str)] = match self.mode {
-                    Mode::Install => &[(Control::First, self.first, "Start with Windows"), (Control::Second, self.second, "Open Simple Screen Grabber when done")],
+                    Mode::Install => &[
+                        (Control::First, self.first, "Start with Windows"),
+                        (
+                            Control::Second,
+                            self.second,
+                            "Open Simple Screen Grabber when done",
+                        ),
+                    ],
                     Mode::Uninstall => &[(Control::First, self.first, "Keep my settings")],
                 };
                 for &(control, checked, label) in boxes {
-                    let Some(r) = self.control_rect(control) else { continue };
+                    let Some(r) = self.control_rect(control) else {
+                        continue;
+                    };
                     let box_rect = rect(r.left, r.top + 6.0, 20.0, 20.0);
                     let hovered = self.hover == Some(control);
                     if checked {
-                        fill(box_rect, if hovered { c.accent_hover } else { c.accent }, 4.0);
+                        fill(
+                            box_rect,
+                            if hovered { c.accent_hover } else { c.accent },
+                            4.0,
+                        );
                         text("\u{E73E}", &self.glyph, box_rect, c.on_accent);
                     } else {
                         fill(box_rect, c.check_stroke, 4.0);
@@ -457,18 +593,50 @@ impl Ui {
                             fill(inner, c.control_hover, 3.0);
                         }
                     }
-                    text(label, &self.body, rect(r.left + 30.0, r.top + 6.0, r.right - r.left - 30.0, 20.0), c.text);
+                    text(
+                        label,
+                        &self.body,
+                        rect(r.left + 30.0, r.top + 6.0, r.right - r.left - 30.0, 20.0),
+                        c.text,
+                    );
                 }
                 if let Some(r) = self.control_rect(Control::License) {
-                    text("By installing, you accept the", &self.caption, rect(r.left, r.top, 170.0, 20.0), c.secondary);
-                    let link = if self.hover == Some(Control::License) { c.accent_pressed } else { c.accent };
-                    text("MIT License", &self.caption, rect(r.left + 162.0, r.top, 100.0, 20.0), link);
+                    text(
+                        "By installing, you accept the",
+                        &self.caption,
+                        rect(r.left, r.top, 170.0, 20.0),
+                        c.secondary,
+                    );
+                    let link = if self.hover == Some(Control::License) {
+                        c.accent_pressed
+                    } else {
+                        c.accent
+                    };
+                    text(
+                        "MIT License",
+                        &self.caption,
+                        rect(r.left + 162.0, r.top, 100.0, 20.0),
+                        link,
+                    );
                 }
             }
             Phase::Working { fraction, .. } => {
                 let track = rect(PAD, 168.0, WIDTH - 2.0 * PAD, 4.0);
-                fill(rect(track.left, track.top + 1.0, track.right - track.left, 2.0), c.track, 1.0);
-                fill(rect(track.left, track.top, (track.right - track.left) * fraction.clamp(0.02, 1.0), 4.0), c.accent, 2.0);
+                fill(
+                    rect(track.left, track.top + 1.0, track.right - track.left, 2.0),
+                    c.track,
+                    1.0,
+                );
+                fill(
+                    rect(
+                        track.left,
+                        track.top,
+                        (track.right - track.left) * fraction.clamp(0.02, 1.0),
+                        4.0,
+                    ),
+                    c.accent,
+                    2.0,
+                );
             }
             Phase::Done | Phase::Failed(_) => {}
         }
@@ -494,7 +662,12 @@ impl Ui {
                 c.accent
             };
             fill(r, color, 4.0);
-            text(self.primary_label(), &self.button, r, if working { c.secondary } else { c.on_accent });
+            text(
+                self.primary_label(),
+                &self.button,
+                r,
+                if working { c.secondary } else { c.on_accent },
+            );
         }
         if let Some(r) = self.control_rect(Control::Secondary) {
             fill(r, c.control_stroke, 4.0);
@@ -524,11 +697,26 @@ fn icon_bitmap(target: &ID2D1HwndRenderTarget, size: i32) -> Result<ID2D1Bitmap>
     // the process ends soon after.
     unsafe {
         let module = GetModuleHandleW(PCWSTR::null())?;
-        let handle = LoadImageW(Some(module.into()), PCWSTR(1 as _), IMAGE_ICON, size, size, LR_DEFAULTCOLOR)?;
-        let wic: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?;
+        let handle = LoadImageW(
+            Some(module.into()),
+            PCWSTR(1 as _),
+            IMAGE_ICON,
+            size,
+            size,
+            LR_DEFAULTCOLOR,
+        )?;
+        let wic: IWICImagingFactory =
+            CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?;
         let bitmap = wic.CreateBitmapFromHICON(HICON(handle.0))?;
         let converter = wic.CreateFormatConverter()?;
-        converter.Initialize(&bitmap, &GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, None, 0.0, WICBitmapPaletteTypeCustom)?;
+        converter.Initialize(
+            &bitmap,
+            &GUID_WICPixelFormat32bppPBGRA,
+            WICBitmapDitherTypeNone,
+            None,
+            0.0,
+            WICBitmapPaletteTypeCustom,
+        )?;
         target.CreateBitmapFromWicBitmap(&converter, None)
     }
 }
@@ -552,10 +740,16 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
             WM_ERASEBKGND => return Some(LRESULT(1)),
             WM_SIZE => {
                 if let Some((target, ..)) = &ui.target {
-                    let (w, h) = ((lparam.0 & 0xFFFF) as u32, ((lparam.0 >> 16) & 0xFFFF) as u32);
+                    let (w, h) = (
+                        (lparam.0 & 0xFFFF) as u32,
+                        ((lparam.0 >> 16) & 0xFFFF) as u32,
+                    );
                     // SAFETY: resizes this window's target.
                     unsafe {
-                        let _ = target.Resize(&D2D_SIZE_U { width: w, height: h });
+                        let _ = target.Resize(&D2D_SIZE_U {
+                            width: w,
+                            height: h,
+                        });
                     }
                 }
             }
@@ -563,7 +757,15 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                 // SAFETY: the suggested rectangle from Windows.
                 unsafe {
                     let r = &*(lparam.0 as *const RECT);
-                    let _ = SetWindowPos(hwnd, None, r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_NOZORDER | SWP_NOACTIVATE);
+                    let _ = SetWindowPos(
+                        hwnd,
+                        None,
+                        r.left,
+                        r.top,
+                        r.right - r.left,
+                        r.bottom - r.top,
+                        SWP_NOZORDER | SWP_NOACTIVATE,
+                    );
                 }
                 ui.target = None;
                 ui.invalidate();
@@ -591,7 +793,11 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                 ui.invalidate();
             }
             WM_SETCURSOR if (lparam.0 & 0xFFFF) as u32 == HTCLIENT => {
-                let id = if ui.hover == Some(Control::License) { IDC_HAND } else { IDC_ARROW };
+                let id = if ui.hover == Some(Control::License) {
+                    IDC_HAND
+                } else {
+                    IDC_ARROW
+                };
                 // SAFETY: shared system cursors.
                 unsafe {
                     if let Ok(cursor) = LoadCursorW(None, id) {
@@ -623,8 +829,12 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                 let key = wparam.0 as u16;
                 let control = match key {
                     k if k == VK_RETURN.0 => Some(Control::Primary),
-                    k if k == VK_ESCAPE.0 && matches!(ui.phase, Phase::Ready) => Some(Control::Secondary),
-                    k if k == VK_ESCAPE.0 && matches!(ui.phase, Phase::Done | Phase::Failed(_)) => Some(Control::Primary),
+                    k if k == VK_ESCAPE.0 && matches!(ui.phase, Phase::Ready) => {
+                        Some(Control::Secondary)
+                    }
+                    k if k == VK_ESCAPE.0 && matches!(ui.phase, Phase::Done | Phase::Failed(_)) => {
+                        Some(Control::Primary)
+                    }
                     k if k == u16::from(b'S') || k == u16::from(b'K') => Some(Control::First),
                     k if k == u16::from(b'O') => Some(Control::Second),
                     _ => None,
@@ -641,7 +851,11 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
             }
             WM_APP_FINISHED => {
                 // SAFETY: as above.
-                let result = *unsafe { Box::from_raw(lparam.0 as *mut std::result::Result<Option<std::path::PathBuf>, String>) };
+                let result = *unsafe {
+                    Box::from_raw(
+                        lparam.0 as *mut std::result::Result<Option<std::path::PathBuf>, String>,
+                    )
+                };
                 ui.phase = match result {
                     Ok(exe) => {
                         if let (Some(exe), true) = (exe, ui.second) {
@@ -657,7 +871,11 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                 if !matches!(ui.phase, Phase::Working { .. }) {
                     // SAFETY: ends this thread's message loop.
                     unsafe {
-                        PostQuitMessage(if matches!(ui.phase, Phase::Done) { 0 } else { 1 });
+                        PostQuitMessage(if matches!(ui.phase, Phase::Done) {
+                            0
+                        } else {
+                            1
+                        });
                     }
                 }
                 return Some(LRESULT(0));
@@ -671,11 +889,24 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
     // Clicks and keys run outside the borrow: the license box is modal.
     if let (Some(LRESULT(code)), WM_LBUTTONUP | WM_KEYDOWN) = (handled, msg) {
         if code > 0 {
-            let control = [Control::Primary, Control::Secondary, Control::First, Control::Second, Control::License][code as usize - 1];
+            let control = [
+                Control::Primary,
+                Control::Secondary,
+                Control::First,
+                Control::Second,
+                Control::License,
+            ][code as usize - 1];
             if control == Control::License {
                 let text: Vec<u16> = LICENSE.encode_utf16().chain([0]).collect();
                 // SAFETY: a modal message box with nothing borrowed.
-                unsafe { MessageBoxW(Some(hwnd), PCWSTR(text.as_ptr()), w!("MIT License"), MB_OK | MB_ICONINFORMATION) };
+                unsafe {
+                    MessageBoxW(
+                        Some(hwnd),
+                        PCWSTR(text.as_ptr()),
+                        w!("MIT License"),
+                        MB_OK | MB_ICONINFORMATION,
+                    )
+                };
             } else {
                 with_ui(|ui| ui.activate(control));
             }
@@ -694,9 +925,19 @@ pub fn run(mode: Mode, payload: &'static [u8], version: &'static str) -> i32 {
     match create(mode, payload, version) {
         Ok(()) => {}
         Err(err) => {
-            let text: Vec<u16> = format!("The setup could not start.\n\n{}", err.message()).encode_utf16().chain([0]).collect();
+            let text: Vec<u16> = format!("The setup could not start.\n\n{}", err.message())
+                .encode_utf16()
+                .chain([0])
+                .collect();
             // SAFETY: a modal message box.
-            unsafe { MessageBoxW(None, PCWSTR(text.as_ptr()), w!("Simple Screen Grabber Setup"), MB_OK) };
+            unsafe {
+                MessageBoxW(
+                    None,
+                    PCWSTR(text.as_ptr()),
+                    w!("Simple Screen Grabber Setup"),
+                    MB_OK,
+                )
+            };
             return 1;
         }
     }
@@ -721,9 +962,16 @@ fn create(mode: Mode, payload: &'static [u8], version: &'static str) -> Result<(
     // attributes are plain values.
     unsafe {
         let module = GetModuleHandleW(PCWSTR::null())?;
-        let icon = LoadImageW(Some(module.into()), PCWSTR(1 as _), IMAGE_ICON, 0, 0, windows::Win32::UI::WindowsAndMessaging::LR_DEFAULTSIZE)
-            .map(|h| HICON(h.0))
-            .unwrap_or_default();
+        let icon = LoadImageW(
+            Some(module.into()),
+            PCWSTR(1 as _),
+            IMAGE_ICON,
+            0,
+            0,
+            windows::Win32::UI::WindowsAndMessaging::LR_DEFAULTSIZE,
+        )
+        .map(|h| HICON(h.0))
+        .unwrap_or_default();
         let class = WNDCLASSEXW {
             cbSize: size_of::<WNDCLASSEXW>() as u32,
             lpfnWndProc: Some(window_proc),
@@ -739,7 +987,20 @@ fn create(mode: Mode, payload: &'static [u8], version: &'static str) -> Result<(
             Mode::Uninstall => w!("Uninstall Simple Screen Grabber"),
         };
         let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-        let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), w!("SimpleScreenGrabber.Setup"), title, style, CW_USEDEFAULT, CW_USEDEFAULT, 100, 100, None, None, Some(module.into()), None)?;
+        let hwnd = CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            w!("SimpleScreenGrabber.Setup"),
+            title,
+            style,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            100,
+            100,
+            None,
+            None,
+            Some(module.into()),
+            None,
+        )?;
 
         // Size the client area for the window's DPI and center it.
         let dpi = GetDpiForWindow(hwnd);
@@ -753,17 +1014,41 @@ fn create(mode: Mode, payload: &'static [u8], version: &'static str) -> Result<(
         AdjustWindowRectExForDpi(&mut r, style, false, WINDOW_EX_STYLE(0), dpi)?;
         let (w, h) = (r.right - r.left, r.bottom - r.top);
         let (sw, sh) = (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
-        SetWindowPos(hwnd, None, (sw - w) / 2, (sh - h) / 2, w, h, SWP_NOZORDER | SWP_NOACTIVATE)?;
+        SetWindowPos(
+            hwnd,
+            None,
+            (sw - w) / 2,
+            (sh - h) / 2,
+            w,
+            h,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        )?;
 
-        let dark = std::env::var("SIMPLE_SCREEN_GRABBER_THEME").map(|t| t == "dark").unwrap_or_else(|_| {
-            registry_dword(w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"), w!("AppsUseLightTheme")) == Some(0)
-        });
+        let dark = std::env::var("SIMPLE_SCREEN_GRABBER_THEME")
+            .map(|t| t == "dark")
+            .unwrap_or_else(|_| {
+                registry_dword(
+                    w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"),
+                    w!("AppsUseLightTheme"),
+                ) == Some(0)
+            });
         let dark_bool = BOOL::from(dark);
         // DWMWA_USE_IMMERSIVE_DARK_MODE
-        let _ = DwmSetWindowAttribute(hwnd, DWMWINDOWATTRIBUTE(20), (&dark_bool as *const BOOL).cast(), 4);
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWINDOWATTRIBUTE(20),
+            (&dark_bool as *const BOOL).cast(),
+            4,
+        );
         // DWMWA_SYSTEMBACKDROP_TYPE = DWMSBT_MAINWINDOW (Mica), Windows 11 22H2+.
         let backdrop = 2i32;
-        let mica = DwmSetWindowAttribute(hwnd, DWMWINDOWATTRIBUTE(38), (&backdrop as *const i32).cast(), 4).is_ok();
+        let mica = DwmSetWindowAttribute(
+            hwnd,
+            DWMWINDOWATTRIBUTE(38),
+            (&backdrop as *const i32).cast(),
+            4,
+        )
+        .is_ok();
         if mica {
             let margins = MARGINS {
                 cxLeftWidth: -1,
@@ -778,11 +1063,18 @@ fn create(mode: Mode, payload: &'static [u8], version: &'static str) -> Result<(
         let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
         let variable = font_exists(&dwrite, w!("Segoe UI Variable Text"));
         let (display, text) = if variable {
-            (w!("Segoe UI Variable Display"), w!("Segoe UI Variable Text"))
+            (
+                w!("Segoe UI Variable Display"),
+                w!("Segoe UI Variable Text"),
+            )
         } else {
             (w!("Segoe UI"), w!("Segoe UI"))
         };
-        let icons = if font_exists(&dwrite, w!("Segoe Fluent Icons")) { w!("Segoe Fluent Icons") } else { w!("Segoe MDL2 Assets") };
+        let icons = if font_exists(&dwrite, w!("Segoe Fluent Icons")) {
+            w!("Segoe Fluent Icons")
+        } else {
+            w!("Segoe MDL2 Assets")
+        };
         let title_format = format(&dwrite, display, DWRITE_FONT_WEIGHT_SEMI_BOLD, 20.0)?;
         let body = format(&dwrite, text, DWRITE_FONT_WEIGHT_NORMAL, 14.0)?;
         body.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP)?;
