@@ -10,6 +10,7 @@ use windows::Win32::Graphics::Gdi::{
     GetDC, GetMonitorInfoW, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
     CAPTUREBLT, DIB_RGB_COLORS, HBITMAP, HDC, HMONITOR, MONITORINFO, SRCCOPY,
 };
+use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::WindowsAndMessaging::{
     GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
@@ -25,6 +26,17 @@ pub struct Monitor {
     pub scale: f32,
 }
 
+/// The local time of a capture, for file names.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Timestamp {
+    pub year: u16,
+    pub month: u16,
+    pub day: u16,
+    pub hour: u16,
+    pub minute: u16,
+    pub second: u16,
+}
+
 /// The pixels of the virtual screen: top-down rows of BGRX, 4 bytes per
 /// pixel (the fourth byte is undefined and treated as opaque).
 pub struct Capture {
@@ -33,8 +45,17 @@ pub struct Capture {
     pub width: i32,
     pub height: i32,
     pub monitors: Vec<Monitor>,
-    bitmap: HBITMAP,
-    bits: *const u8,
+    pub time: Timestamp,
+    storage: Storage,
+}
+
+/// Where the pixels live.
+enum Storage {
+    /// A GDI DIB section, filled by BitBlt.
+    Dib { bitmap: HBITMAP, bits: *const u8 },
+    /// Plain memory, for tests with synthetic images.
+    #[cfg(test)]
+    Owned(Vec<u8>),
 }
 
 impl Capture {
@@ -48,9 +69,30 @@ impl Capture {
     }
 
     pub fn pixels(&self) -> &[u8] {
-        // SAFETY: `bits` points to the DIB section owned by `bitmap`, which
-        // holds height rows of stride bytes and lives as long as `self`.
-        unsafe { std::slice::from_raw_parts(self.bits, self.stride() * self.height as usize) }
+        match &self.storage {
+            // SAFETY: `bits` points to the DIB section owned by `bitmap`,
+            // which holds height rows of stride bytes and lives as long as
+            // `self`.
+            Storage::Dib { bits, .. } => unsafe {
+                std::slice::from_raw_parts(*bits, self.stride() * self.height as usize)
+            },
+            #[cfg(test)]
+            Storage::Owned(pixels) => pixels,
+        }
+    }
+
+    /// A capture of synthetic pixels (BGRX rows), for tests.
+    #[cfg(test)]
+    pub fn synthetic(width: i32, height: i32, monitors: Vec<Monitor>, pixels: Vec<u8>) -> Capture {
+        assert_eq!(pixels.len(), width as usize * height as usize * 4);
+        Capture {
+            origin: Point::default(),
+            width,
+            height,
+            monitors,
+            time: Timestamp::default(),
+            storage: Storage::Owned(pixels),
+        }
     }
 
     /// The monitor that contains `p`, or the nearest one.
@@ -72,10 +114,14 @@ impl Capture {
 
 impl Drop for Capture {
     fn drop(&mut self) {
-        // SAFETY: the DIB section is owned by this capture and no longer
-        // selected into a DC.
-        unsafe {
-            let _ = DeleteObject(self.bitmap.into());
+        match self.storage {
+            // SAFETY: the DIB section is owned by this capture and no
+            // longer selected into a DC.
+            Storage::Dib { bitmap, .. } => unsafe {
+                let _ = DeleteObject(bitmap.into());
+            },
+            #[cfg(test)]
+            Storage::Owned(_) => {}
         }
     }
 }
@@ -117,6 +163,7 @@ pub fn capture_screen() -> Result<Capture> {
     if width <= 0 || height <= 0 {
         return Err(Error::from_thread());
     }
+    let time = local_time();
     let monitors = monitors(Point::new(x, y));
 
     let info = BITMAPINFO {
@@ -144,8 +191,11 @@ pub fn capture_screen() -> Result<Capture> {
             width,
             height,
             monitors,
-            bitmap,
-            bits: bits.cast_const().cast(),
+            time,
+            storage: Storage::Dib {
+                bitmap,
+                bits: bits.cast_const().cast(),
+            },
         };
         let previous = SelectObject(memory.0, bitmap.into());
         // CAPTUREBLT includes layered windows (menus, tooltips).
@@ -163,6 +213,19 @@ pub fn capture_screen() -> Result<Capture> {
         SelectObject(memory.0, previous);
         copied?;
         Ok(capture)
+    }
+}
+
+fn local_time() -> Timestamp {
+    // SAFETY: plain query.
+    let t = unsafe { GetLocalTime() };
+    Timestamp {
+        year: t.wYear,
+        month: t.wMonth,
+        day: t.wDay,
+        hour: t.wHour,
+        minute: t.wMinute,
+        second: t.wSecond,
     }
 }
 

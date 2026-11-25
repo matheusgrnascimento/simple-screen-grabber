@@ -5,12 +5,14 @@
 
 mod app;
 mod capture;
+mod export;
 mod fluent;
 mod geometry;
 mod gfx;
 mod hotkey;
 mod log;
 mod overlay;
+mod paths;
 mod tray;
 mod win;
 

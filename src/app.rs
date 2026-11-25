@@ -8,25 +8,35 @@
 //! Modal loops (menus, message boxes) run while nothing is borrowed.
 
 use std::cell::RefCell;
+use std::path::{Path, PathBuf};
 
 use windows::core::{w, Result, PCWSTR};
 use windows::Win32::Foundation::{
     GetLastError, ERROR_ALREADY_EXISTS, HWND, LPARAM, LRESULT, POINT, WPARAM,
 };
-use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+use windows::Win32::System::Com::{
+    CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED, COINIT_MULTITHREADED,
+};
 use windows::Win32::System::Threading::CreateMutexW;
-use windows::Win32::UI::Shell::{NINF_KEY, NIN_BALLOONUSERCLICK, NIN_SELECT};
+use windows::Win32::UI::Shell::{
+    ILCreateFromPathW, ILFree, SHOpenFolderAndSelectItems, ShellExecuteW, NINF_KEY,
+    NIN_BALLOONUSERCLICK, NIN_SELECT,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
     FindWindowW, GetMessageW, GetWindowThreadProcessId, PostMessageW, PostQuitMessage,
-    RegisterClassExW, RegisterWindowMessageW, TranslateMessage, MSG, WM_APP, WM_CONTEXTMENU,
-    WM_DISPLAYCHANGE, WM_HOTKEY, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_POPUP,
+    RegisterClassExW, RegisterWindowMessageW, TranslateMessage, MSG, SW_SHOWNORMAL, WM_APP,
+    WM_CONTEXTMENU, WM_DESTROYCLIPBOARD, WM_DISPLAYCHANGE, WM_ENDSESSION, WM_HOTKEY,
+    WM_RENDERALLFORMATS, WM_RENDERFORMAT, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
+use crate::capture::Timestamp;
+use crate::export::{self, clipboard::Clipboard, Image};
 use crate::fluent::Palette;
 use crate::hotkey::{self, Hotkey};
 use crate::log;
 use crate::overlay::{self, Overlay};
+use crate::paths;
 use crate::tray::{self, MenuItem, Tray};
 use crate::win::{self, Handle};
 
@@ -34,6 +44,8 @@ use crate::win::{self, Handle};
 const WM_APP_TRAY: u32 = WM_APP + 1;
 /// Sent by a second launch of the app: start a capture.
 const WM_APP_CAPTURE: u32 = WM_APP + 2;
+/// Sent by the save thread; `lparam` is a `Box<Result<PathBuf>>`.
+const WM_APP_SAVED: u32 = WM_APP + 3;
 
 const HOST_CLASS: PCWSTR = w!("SimpleScreenGrabber.Host");
 const INSTANCE_MUTEX: PCWSTR = w!("Local\\SimpleScreenGrabber.Instance");
@@ -43,6 +55,7 @@ const APP_NAME: &str = "Simple Screen Grabber";
 const NIN_KEYSELECT: u32 = NIN_SELECT | NINF_KEY;
 
 const CMD_CAPTURE: u32 = 1;
+const CMD_OPEN_FOLDER: u32 = 2;
 const CMD_EXIT: u32 = 99;
 
 /// Command line options.
@@ -69,10 +82,26 @@ struct App {
     host: HWND,
     tray: Tray,
     overlay: Overlay,
+    clipboard: Clipboard,
     hotkey: Hotkey,
     registration: Option<hotkey::Registration>,
     taskbar_created: u32,
+    /// What a click on the last notification does.
+    notification: NotificationAction,
 }
+
+/// What a click on a notification does.
+enum NotificationAction {
+    None,
+    /// Show a saved screenshot in File Explorer.
+    ShowFile(PathBuf),
+}
+
+/// A window handle that the save thread may post to.
+struct PostTarget(HWND);
+
+// SAFETY: PostMessageW accepts a window of another thread.
+unsafe impl Send for PostTarget {}
 
 /// Runs the app until the user exits it.
 pub fn run(options: Options) -> Result<()> {
@@ -93,9 +122,11 @@ pub fn run(options: Options) -> Result<()> {
         host,
         tray,
         overlay,
+        clipboard: Clipboard::new(),
         hotkey,
         registration: None,
         taskbar_created,
+        notification: NotificationAction::None,
     };
     app.register_hotkey();
     if !options.autostart {
@@ -108,6 +139,8 @@ pub fn run(options: Options) -> Result<()> {
 
     let result = message_loop();
 
+    // Leave a copied image on the clipboard after exit.
+    with_app(|app| app.clipboard.render_all(app.host));
     // Drop the app (tray icon, shortcut) before its window.
     APP.with(|cell| cell.borrow_mut().take());
     // SAFETY: the host window belongs to this thread.
@@ -231,6 +264,8 @@ impl App {
         let reply = self.overlay.message(msg, wparam, lparam);
         match reply.event {
             Some(overlay::Event::Close) => self.overlay.close(),
+            Some(overlay::Event::Copy) => self.copy(),
+            Some(overlay::Event::Save) => self.save(),
             None => {}
         }
         reply.result
@@ -242,9 +277,19 @@ impl App {
             WM_APP_CAPTURE => self.capture(),
             WM_APP_TRAY => match win::low_word(lparam.0 as usize) {
                 NIN_SELECT | NIN_KEYSELECT => self.capture(),
-                NIN_BALLOONUSERCLICK => {}
+                NIN_BALLOONUSERCLICK => self.notification_clicked(),
                 _ => {}
             },
+            WM_APP_SAVED => {
+                // SAFETY: the save thread posted a pointer from Box::into_raw,
+                // and this is its only consumer.
+                let result = unsafe { Box::from_raw(lparam.0 as *mut Result<PathBuf>) };
+                self.saved(*result);
+            }
+            WM_RENDERFORMAT => self.clipboard.render(wparam.0 as u32),
+            WM_RENDERALLFORMATS => self.clipboard.render_all(self.host),
+            WM_DESTROYCLIPBOARD => self.clipboard.release(),
+            WM_ENDSESSION if wparam.0 != 0 => self.clipboard.render_all(self.host),
             WM_DISPLAYCHANGE => self.tray.refresh_icon(),
             _ if msg == self.taskbar_created && msg != 0 => {
                 self.tray.refresh_icon();
@@ -266,6 +311,13 @@ impl App {
                 enabled: true,
                 default: true,
             },
+            MenuItem::Command {
+                id: CMD_OPEN_FOLDER,
+                label: "Open screenshots folder".into(),
+                checked: false,
+                enabled: true,
+                default: false,
+            },
             MenuItem::Separator,
             MenuItem::Command {
                 id: CMD_EXIT,
@@ -280,6 +332,13 @@ impl App {
     fn command(&mut self, id: u32) {
         match id {
             CMD_CAPTURE => self.capture(),
+            CMD_OPEN_FOLDER => match self.save_folder() {
+                Some(folder) => {
+                    let _ = std::fs::create_dir_all(&folder);
+                    open_folder(&folder);
+                }
+                None => self.tray.notify("Couldn't find the Screenshots folder", ""),
+            },
             // SAFETY: ends the message loop of this thread.
             CMD_EXIT => unsafe { PostQuitMessage(0) },
             _ => {}
@@ -306,5 +365,129 @@ impl App {
             self.tray
                 .notify("Couldn't capture the screen", &err.message());
         }
+    }
+
+    /// The folder for saved screenshots.
+    fn save_folder(&self) -> Option<PathBuf> {
+        paths::screenshots_folder()
+    }
+
+    /// Copies the selection and closes the overlay.
+    fn copy(&mut self) {
+        let image = self.overlay.export();
+        self.overlay.close();
+        if let Some((image, _)) = image {
+            if let Err(err) = self.clipboard.copy(self.host, image) {
+                log!("copy failed: {err}");
+                self.tray
+                    .notify("Couldn't copy the screenshot", &err.message());
+            }
+        }
+    }
+
+    /// Closes the overlay at once and saves the selection on another
+    /// thread; a notification follows.
+    fn save(&mut self) {
+        let image = self.overlay.export();
+        self.overlay.close();
+        let Some((image, time)) = image else {
+            return;
+        };
+        let Some(folder) = self.save_folder() else {
+            self.tray.notify(
+                "Couldn't save the screenshot",
+                "The Screenshots folder was not found.",
+            );
+            return;
+        };
+        spawn_save(PostTarget(self.host), image, folder, time);
+    }
+
+    fn saved(&mut self, result: Result<PathBuf>) {
+        match result {
+            Ok(path) => {
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                self.tray.notify("Screenshot saved", &name);
+                self.notification = NotificationAction::ShowFile(path);
+            }
+            Err(err) => {
+                log!("save failed: {err}");
+                self.tray
+                    .notify("Couldn't save the screenshot", &err.message());
+                self.notification = NotificationAction::None;
+            }
+        }
+    }
+
+    fn notification_clicked(&mut self) {
+        match std::mem::replace(&mut self.notification, NotificationAction::None) {
+            NotificationAction::ShowFile(path) => show_in_folder(&path),
+            NotificationAction::None => {}
+        }
+    }
+}
+
+/// Encodes and writes the PNG on its own thread, then posts the result to
+/// the host window.
+fn spawn_save(target: PostTarget, image: Image, folder: PathBuf, time: Timestamp) {
+    std::thread::spawn(move || {
+        let target = target;
+        // SAFETY: COM for this thread, balanced by CoUninitialize below.
+        let com = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok();
+        let result = export::save(&image, &folder, time);
+        drop(image);
+        if com {
+            // SAFETY: balances the CoInitializeEx above.
+            unsafe { CoUninitialize() };
+        }
+        let raw = Box::into_raw(Box::new(result));
+        // SAFETY: the host window takes ownership of the box when it
+        // handles the message; if posting fails, it is reclaimed here.
+        unsafe {
+            if PostMessageW(
+                Some(target.0),
+                WM_APP_SAVED,
+                WPARAM(0),
+                LPARAM(raw as isize),
+            )
+            .is_err()
+            {
+                drop(Box::from_raw(raw));
+            }
+        }
+    });
+}
+
+/// Opens a folder in File Explorer.
+fn open_folder(folder: &Path) {
+    let path = win::wide(&folder.to_string_lossy());
+    // SAFETY: the path is null-terminated and outlives the call.
+    unsafe {
+        ShellExecuteW(
+            None,
+            w!("open"),
+            win::pcwstr(&path),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        );
+    }
+}
+
+/// Opens File Explorer on the file's folder with the file selected.
+fn show_in_folder(file: &Path) {
+    let path = win::wide(&file.to_string_lossy());
+    // SAFETY: the item list is created from a null-terminated path and
+    // freed after use.
+    unsafe {
+        let item = ILCreateFromPathW(win::pcwstr(&path));
+        if item.is_null() {
+            return;
+        }
+        let _ = SHOpenFolderAndSelectItems(item, None, 0);
+        ILFree(Some(item));
     }
 }

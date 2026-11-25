@@ -36,21 +36,22 @@ use windows::Win32::Graphics::Dxgi::{
 };
 use windows::Win32::Graphics::Gdi::{InvalidateRect, ValidateRect};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RIGHT,
-    VK_SHIFT, VK_UP,
+    GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_LEFT,
+    VK_RETURN, VK_RIGHT, VK_SHIFT, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, GetCursorPos, GetSystemMetrics, LoadCursorW, RegisterClassExW, SetCursor,
     SetForegroundWindow, SetWindowPos, ShowWindow, CS_DBLCLKS, HCURSOR, HTCLIENT, HWND_TOPMOST,
     IDC_ARROW, IDC_CROSS, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE,
     SM_CXDRAG, SM_CYDRAG, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, WA_INACTIVE, WM_ACTIVATE,
-    WM_CAPTURECHANGED, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR, WNDCLASSEXW, WNDPROC, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP,
+    WM_CAPTURECHANGED, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN,
+    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR,
+    WNDCLASSEXW, WNDPROC, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use self::selection::Handle;
-use crate::capture::{self, Capture};
+use crate::capture::{self, Capture, Timestamp};
+use crate::export::Image;
 use crate::fluent::Palette;
 use crate::geometry::{Point, Rect};
 use crate::gfx::Gfx;
@@ -65,6 +66,10 @@ const IDLE_BUFFER: u32 = 8;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event {
     Close,
+    /// Copy the selection, then close.
+    Copy,
+    /// Save the selection, then close.
+    Save,
 }
 
 /// The result of handling a window message.
@@ -316,6 +321,16 @@ impl Overlay {
         Ok(())
     }
 
+    /// The image to save or copy: the selection, or the whole monitor under
+    /// the mouse when nothing is selected. Taken before the overlay closes.
+    pub fn export(&self) -> Option<(Image, Timestamp)> {
+        let session = self.session.as_ref()?;
+        let area = session
+            .selection
+            .unwrap_or_else(|| session.capture.monitor_at(session.mouse).rect);
+        Some((Image::crop(&session.capture, area), session.capture.time))
+    }
+
     /// Hides the overlay and frees the capture.
     pub fn close(&mut self) {
         if self.session.take().is_none() {
@@ -467,6 +482,19 @@ impl Overlay {
                 self.button_up(point(lparam));
                 Reply::handled(0)
             }
+            WM_LBUTTONDBLCLK => {
+                let p = point(lparam);
+                let inside = self
+                    .session
+                    .as_ref()
+                    .and_then(|s| s.selection)
+                    .is_some_and(|sel| sel.contains(p));
+                if inside {
+                    Reply::event(Event::Copy)
+                } else {
+                    Reply::handled(0)
+                }
+            }
             WM_CAPTURECHANGED => {
                 if lparam.0 != self.hwnd.0 as isize {
                     self.end_drag();
@@ -603,8 +631,14 @@ impl Overlay {
     }
 
     fn key_down(&mut self, key: u16) -> Reply {
-        if key == VK_ESCAPE.0 {
-            return Reply::event(Event::Close);
+        // SAFETY: reads the keyboard state of this thread.
+        let ctrl = unsafe { GetKeyState(i32::from(VK_CONTROL.0)) } < 0;
+        match key {
+            k if k == VK_ESCAPE.0 => return Reply::event(Event::Close),
+            k if k == VK_RETURN.0 => return Reply::event(Event::Copy),
+            k if ctrl && k == u16::from(b'C') => return Reply::event(Event::Copy),
+            k if ctrl && k == u16::from(b'S') => return Reply::event(Event::Save),
+            _ => {}
         }
         let Some(session) = &mut self.session else {
             return Reply::default();
