@@ -32,12 +32,11 @@ impl Button {
 }
 
 /// The tools bar, top to bottom; `None` is a separator.
-const TOOLS: [Option<Button>; 10] = [
+const TOOLS: [Option<Button>; 9] = [
     Some(Button::Tool(Tool::Arrow)),
     Some(Button::Tool(Tool::Rectangle)),
     Some(Button::Tool(Tool::Line)),
     Some(Button::Tool(Tool::Pen)),
-    Some(Button::Tool(Tool::Highlighter)),
     None,
     Some(Button::Color),
     None,
@@ -95,7 +94,7 @@ pub struct Flyout {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Toolbars {
     pub scale: f32,
-    pub tools: Bar<10>,
+    pub tools: Bar<9>,
     pub actions: Bar<4>,
     pub flyout: Option<Flyout>,
 }

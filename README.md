@@ -5,9 +5,9 @@ Simple native Windows app for screenshots: press a shortcut, select an area, ann
 ## Features
 
 - **Ctrl+Alt+S** (configurable) dims the screen at once and freezes every monitor in a selection overlay;
-- drag to select an area: both corner pixels are included, and the size shows in pixels. Move the selection by dragging inside it or with the arrow keys (Shift: 10 px), resize it with Windows 11 style handles;
+- drag to select an area, or **Ctrl+A** for the whole monitor (again: every monitor): both corner pixels are included, and the size shows in pixels. Move the selection by dragging inside it or with the arrow keys (Shift: 10 px), resize it with Windows 11 style handles;
 - pixel-exact output: the app is per-monitor DPI aware (PerMonitorV2), so nothing is ever scaled, also for selections across monitors with different scales. Without annotations the PNG holds the captured pixels unchanged;
-- annotations: arrow, rectangle, line, pen and highlighter, in 8 colors, with the stroke width on the mouse wheel (the brush outline follows the mouse), Shift for 45 degree lines and squares, and undo/redo. They are vectors, drawn again at native resolution for the output with the same code as the overlay;
+- annotations: arrow, rectangle, line and pen, in 8 colors (blue by default), with the stroke width on the mouse wheel (the brush outline follows the mouse), Shift for 45 degree lines and squares, and undo/redo. They are vectors, drawn again at native resolution for the output with the same code as the overlay;
 - **Ctrl+S** saves a lossless PNG to the Windows Screenshots folder (`Pictures\Screenshots`, or a folder of your choice) as `2026-11-25_14-32-10.png`, without ever replacing a file, and a notification opens it in File Explorer;
 - **Ctrl+C**, **Enter** or a double-click copies it: the clipboard announces a bitmap and a PNG, and makes them only when an app pastes;
 - with nothing selected, saving or copying takes the monitor under the mouse;
@@ -23,7 +23,8 @@ In the overlay:
 | Key | Action |
 |---|---|
 | drag | select an area; inside it, move it; on a handle, resize it |
-| `A` / `R` / `L` / `P` / `H` | arrow, rectangle, line, pen, highlighter (again: back to selecting) |
+| `Ctrl+A` | select the whole monitor under the mouse; again: every monitor |
+| `A` / `R` / `L` / `P` | arrow, rectangle, line, pen (again: back to selecting) |
 | `1` to `8` | color |
 | mouse wheel, `[` / `]` | thinner / thicker stroke |
 | Shift while drawing | lines and arrows at 45 degree steps, squares |
@@ -43,7 +44,7 @@ Every toolbar button has a tooltip with its shortcut. Launching the app again wh
 |---|---|---|
 | `hotkey` | `"Ctrl+Alt+S"` | Modifiers `Ctrl`, `Alt`, `Shift`, `Win` and a letter, digit, `F1`-`F24`, `PrintScreen`, `Insert`, `Delete`, `Home`, `End`, `PageUp`, `PageDown`, `Pause` or `ScrollLock`. Letters and digits need Ctrl, Alt or Win |
 | `save_folder` | `''` | Empty: the Windows Screenshots folder. Use single quotes for paths (`'D:\Shots'`); `%VARIABLES%` expand and relative paths start at the settings folder |
-| `color` | `"red"` | `red`, `orange`, `yellow`, `green`, `blue`, `purple`, `black` or `white` |
+| `color` | `"blue"` | `red`, `orange`, `yellow`, `green`, `blue`, `purple`, `black` or `white` |
 | `stroke_width` | `3` | 1 to 20 pixels at 100% display scale |
 
 **Portable mode**: with a file named `portable` next to `simple-screen-grabber.exe`, the settings stay in that folder and nothing is written anywhere else (Start with Windows is then not available).

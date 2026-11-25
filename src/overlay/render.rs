@@ -111,7 +111,6 @@ fn bitmap_properties(premultiplied: bool, options: D2D1_BITMAP_OPTIONS) -> D2D1_
 /// on Windows 10).
 mod glyph {
     pub const PEN: char = '\u{E76D}';
-    pub const HIGHLIGHTER: char = '\u{E7E6}';
     pub const UNDO: char = '\u{E7A7}';
     pub const REDO: char = '\u{E7A6}';
     pub const COPY: char = '\u{E8C8}';
@@ -869,7 +868,6 @@ impl Painter {
                 None
             }
             Button::Tool(Tool::Pen) => Some(glyph::PEN),
-            Button::Tool(Tool::Highlighter) => Some(glyph::HIGHLIGHTER),
             Button::Undo => Some(glyph::UNDO),
             Button::Redo => Some(glyph::REDO),
             Button::Copy => Some(glyph::COPY),
@@ -961,13 +959,13 @@ impl Painter {
     /// The outline of the brush under the mouse while a tool is on: shows
     /// the stroke width the mouse wheel sets.
     fn brush_outline(&self, ctx: &ID2D1DeviceContext, session: &Session) {
-        let Some(tool) = session.tool else {
+        if session.tool.is_none() {
             return;
-        };
+        }
         if session.hover.is_some() || !matches!(session.drag, Drag::None | Drag::Drawing) {
             return;
         }
-        let radius = (tool.stroke_width(session.width) / 2.0).max(2.0);
+        let radius = (session.width / 2.0).max(2.0);
         let (x, y) = (session.mouse.x as f32 + 0.5, session.mouse.y as f32 + 0.5);
         // SAFETY: draws with a brush of the same device context.
         unsafe {

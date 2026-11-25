@@ -57,7 +57,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use self::selection::Handle;
 use self::toolbar::{Button, Hit, Toolbars};
 use crate::annotate::draw::ShapePainter;
-use crate::annotate::{History, PointF, Shape, Tool, COLORS, MAX_WIDTH, MIN_WIDTH};
+use crate::annotate::{History, PointF, Shape, Tool, COLORS, DEFAULT_COLOR, MAX_WIDTH, MIN_WIDTH};
 use crate::capture::{self, Capture, Timestamp};
 use crate::export::{self, Image};
 use crate::fluent::Theme;
@@ -404,7 +404,7 @@ impl Overlay {
             session: None,
             fade_start: None,
             fade_timer: false,
-            default_color: 0,
+            default_color: DEFAULT_COLOR,
             default_width: 3.0,
             dimmer,
             last_open: OpenTimings::default(),
@@ -1071,6 +1071,17 @@ impl Overlay {
                     session.history.undo();
                 }
             }
+            // Ctrl+A: the whole monitor under the mouse; again: every monitor.
+            k if ctrl && !busy && k == u16::from(b'A') => {
+                let monitor = session.capture.monitor_at(session.mouse).rect;
+                let all = session.capture.bounds();
+                session.selection = Some(if session.selection == Some(monitor) {
+                    all
+                } else {
+                    monitor
+                });
+                session.flyout_open = false;
+            }
             k if ctrl && !busy && k == u16::from(b'Y') => {
                 session.history.redo();
             }
@@ -1238,12 +1249,6 @@ mod tests {
             add(Tool::Arrow, 0, (300.0, 470.0), &[(430.0, 380.0)]);
             add(Tool::Rectangle, 4, (520.0, 220.0), &[(760.0, 330.0)]);
             add(Tool::Line, 3, (260.0, 520.0), &[(500.0, 520.0)]);
-            add(
-                Tool::Highlighter,
-                2,
-                (262.0, 213.0),
-                &[(330.0, 213.0), (420.0, 213.0)],
-            );
             add(
                 Tool::Pen,
                 5,

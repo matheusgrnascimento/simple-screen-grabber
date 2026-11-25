@@ -11,7 +11,7 @@
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::annotate::COLORS;
+use crate::annotate::{COLORS, DEFAULT_COLOR};
 use crate::hotkey::Hotkey;
 
 const FILE_NAME: &str = "config.toml";
@@ -40,7 +40,7 @@ impl Default for Config {
         Config {
             hotkey: Hotkey::DEFAULT,
             save_folder: None,
-            color: 0,
+            color: DEFAULT_COLOR,
             stroke_width: 3.0,
         }
     }
@@ -137,7 +137,7 @@ stroke_width = {width}
 ",
         hotkey = Hotkey::DEFAULT,
         colors = colors.join(", "),
-        color = colors[0],
+        color = colors[DEFAULT_COLOR],
         min = MIN_STROKE,
         max = MAX_STROKE,
         width = Config::default().stroke_width,

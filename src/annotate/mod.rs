@@ -15,17 +15,10 @@ pub enum Tool {
     Rectangle,
     Line,
     Pen,
-    Highlighter,
 }
 
 impl Tool {
-    pub const ALL: [Tool; 5] = [
-        Tool::Arrow,
-        Tool::Rectangle,
-        Tool::Line,
-        Tool::Pen,
-        Tool::Highlighter,
-    ];
+    pub const ALL: [Tool; 4] = [Tool::Arrow, Tool::Rectangle, Tool::Line, Tool::Pen];
 
     pub const fn name(self) -> &'static str {
         match self {
@@ -33,7 +26,6 @@ impl Tool {
             Tool::Rectangle => "Rectangle",
             Tool::Line => "Line",
             Tool::Pen => "Pen",
-            Tool::Highlighter => "Highlighter",
         }
     }
 
@@ -44,7 +36,6 @@ impl Tool {
             Tool::Rectangle => b'R',
             Tool::Line => b'L',
             Tool::Pen => b'P',
-            Tool::Highlighter => b'H',
         }
     }
 
@@ -52,22 +43,14 @@ impl Tool {
         Tool::ALL.into_iter().find(|t| u16::from(t.key()) == key)
     }
 
-    /// The width a stroke of this tool is drawn with for a chosen width.
-    pub fn stroke_width(self, width: f32) -> f32 {
-        match self {
-            Tool::Highlighter => width * HIGHLIGHTER_FACTOR,
-            _ => width,
-        }
-    }
-
     /// Freehand tools record every mouse position; the others keep only
     /// the start and end points.
     pub const fn is_freehand(self) -> bool {
-        matches!(self, Tool::Pen | Tool::Highlighter)
+        matches!(self, Tool::Pen)
     }
 }
 
-/// The annotation colors. The default is the first one.
+/// The annotation colors.
 pub const COLORS: [(Color, &str); 8] = [
     (Color::rgb(0xFF, 0x4B, 0x4B), "Red"),
     (Color::rgb(0xFF, 0x8C, 0x00), "Orange"),
@@ -83,10 +66,8 @@ pub const COLORS: [(Color, &str); 8] = [
 pub const MIN_WIDTH: f32 = 1.0;
 pub const MAX_WIDTH: f32 = 64.0;
 
-/// How much wider the highlighter is than the stroke width.
-const HIGHLIGHTER_FACTOR: f32 = 5.0;
-/// The highlighter's opacity: text under it stays readable.
-pub const HIGHLIGHTER_OPACITY: f32 = 0.45;
+/// The default color: blue.
+pub const DEFAULT_COLOR: usize = 4;
 
 /// A point in overlay pixels; pixel centers are at `.5`.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -115,7 +96,7 @@ impl PointF {
 pub struct Shape {
     pub tool: Tool,
     pub color: Color,
-    /// The stroke width in pixels, as chosen (see [`Shape::stroke_width`]).
+    /// The stroke width in pixels.
     pub width: f32,
     /// Start and end for arrows, rectangles and lines; every position for
     /// freehand tools.
@@ -138,8 +119,8 @@ impl Shape {
     }
 
     /// The width the stroke is drawn with.
-    pub fn stroke_width(&self) -> f32 {
-        self.tool.stroke_width(self.width)
+    pub const fn stroke_width(&self) -> f32 {
+        self.width
     }
 
     /// Follows the mouse to `p`. With `constrain` (Shift), lines and arrows
@@ -274,7 +255,8 @@ mod tests {
 
     #[test]
     fn keys_pick_tools() {
-        assert_eq!(Tool::from_key(u16::from(b'H')), Some(Tool::Highlighter));
+        assert_eq!(Tool::from_key(u16::from(b'P')), Some(Tool::Pen));
+        assert_eq!(Tool::from_key(u16::from(b'H')), None);
         assert_eq!(Tool::from_key(u16::from(b'Z')), None);
     }
 
@@ -315,12 +297,6 @@ mod tests {
         let mut shape = Shape::new(Tool::Rectangle, RED, 3.0, PointF::new(10.0, 10.0));
         shape.extend(PointF::new(40.0, -5.0), true);
         assert_eq!(shape.points[1], PointF::new(40.0, -20.0));
-    }
-
-    #[test]
-    fn highlighter_is_wider() {
-        let shape = Shape::new(Tool::Highlighter, RED, 3.0, PointF::default());
-        assert_eq!(shape.stroke_width(), 15.0);
     }
 
     #[test]

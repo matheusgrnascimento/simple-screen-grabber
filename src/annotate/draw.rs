@@ -1,8 +1,6 @@
 //! Draws annotations with Direct2D. The overlay and the export use this same
 //! code, so a saved image matches what was on screen.
 
-use std::mem::ManuallyDrop;
-
 use windows::core::Result;
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, D2D_RECT_F,
@@ -10,12 +8,12 @@ use windows::Win32::Graphics::Direct2D::Common::{
 use windows::Win32::Graphics::Direct2D::{
     ID2D1DeviceContext, ID2D1PathGeometry, ID2D1SolidColorBrush, ID2D1StrokeStyle,
     D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_CAP_STYLE_FLAT, D2D1_CAP_STYLE_ROUND,
-    D2D1_DASH_STYLE_SOLID, D2D1_ELLIPSE, D2D1_LAYER_OPTIONS1_NONE, D2D1_LAYER_PARAMETERS1,
-    D2D1_LINE_JOIN_MITER, D2D1_LINE_JOIN_ROUND, D2D1_STROKE_STYLE_PROPERTIES,
+    D2D1_DASH_STYLE_SOLID, D2D1_ELLIPSE, D2D1_LINE_JOIN_MITER, D2D1_LINE_JOIN_ROUND,
+    D2D1_STROKE_STYLE_PROPERTIES,
 };
 use windows_numerics::{Matrix3x2, Vector2};
 
-use super::{PointF, Shape, Tool, HIGHLIGHTER_OPACITY};
+use super::{PointF, Shape, Tool};
 use crate::gfx;
 
 /// Half the width of an arrow head relative to its length.
@@ -116,27 +114,6 @@ impl ShapePainter {
             Tool::Arrow => self.arrow(ctx, shape.points[0], shape.points[1], width, base),
             Tool::Rectangle => self.rectangle(ctx, shape.points[0], shape.points[1], width),
             Tool::Pen => self.stroke(ctx, &shape.points, width),
-            Tool::Highlighter => {
-                // One layer per stroke: where the stroke crosses itself the
-                // color is applied once, like a real marker; two strokes
-                // still add up.
-                let (min, max) = shape.bounds();
-                let params = D2D1_LAYER_PARAMETERS1 {
-                    contentBounds: gfx::rect_f(min.x, min.y, max.x, max.y),
-                    geometricMask: ManuallyDrop::new(None),
-                    maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-                    maskTransform: Matrix3x2::identity(),
-                    opacity: HIGHLIGHTER_OPACITY,
-                    opacityBrush: ManuallyDrop::new(None),
-                    layerOptions: D2D1_LAYER_OPTIONS1_NONE,
-                };
-                // SAFETY: the layer is popped right after the stroke.
-                unsafe {
-                    ctx.PushLayer(&params, None);
-                    self.stroke(ctx, &shape.points, width);
-                    ctx.PopLayer();
-                }
-            }
         }
     }
 
