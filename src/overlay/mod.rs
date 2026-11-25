@@ -491,7 +491,13 @@ impl Overlay {
             }
         };
         let captured = started.elapsed();
-        let bitmap = self.upload(&capture)?;
+        let bitmap = match self.upload(&capture) {
+            Ok(bitmap) => bitmap,
+            Err(err) => {
+                self.hide_dimmer();
+                return Err(err);
+            }
+        };
         let uploaded = started.elapsed();
         self.last_size = (capture.width, capture.height);
         let mut cursor = POINT::default();
@@ -505,7 +511,7 @@ impl Overlay {
         // SAFETY: positions and shows this thread's window while it is
         // still cloaked, so nothing appears yet.
         unsafe {
-            SetWindowPos(
+            if let Err(err) = SetWindowPos(
                 self.hwnd,
                 Some(HWND_TOPMOST),
                 origin.x,
@@ -513,7 +519,10 @@ impl Overlay {
                 width,
                 height,
                 SWP_NOACTIVATE | SWP_SHOWWINDOW,
-            )?;
+            ) {
+                self.close();
+                return Err(err);
+            }
         }
         if let Err(err) = self
             .resize_buffers(width as u32, height as u32)
