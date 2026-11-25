@@ -20,6 +20,12 @@ impl Color {
     pub const fn rgba(r: u8, g: u8, b: u8, a: u8) -> Color {
         Color { r, g, b, a }
     }
+
+    /// This color blended toward `other` by `t` (0 = self, 1 = other).
+    pub fn mix(self, other: Color, t: f32) -> Color {
+        let f = |a: u8, b: u8| (f32::from(a) * (1.0 - t) + f32::from(b) * t).round() as u8;
+        Color::rgb(f(self.r, other.r), f(self.g, other.g), f(self.b, other.b))
+    }
 }
 
 const PERSONALIZE_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize";
@@ -38,6 +44,7 @@ pub struct Palette {
     /// Dims the screen outside the selection.
     pub scrim: Color,
     pub accent: Color,
+    pub accent_hover: Color,
     /// Text and icons on `accent`.
     pub on_accent: Color,
     /// Outer disc of the selection handles.
@@ -48,6 +55,14 @@ pub struct Palette {
     pub flyout_border: Color,
     pub text: Color,
     pub text_secondary: Color,
+    pub text_disabled: Color,
+    /// Translucent hover and pressed fills of toolbar buttons.
+    pub subtle_hover: Color,
+    pub subtle_pressed: Color,
+    /// Separators inside toolbars.
+    pub divider: Color,
+    /// Ring around color swatches, so white and black stay visible.
+    pub swatch_ring: Color,
 }
 
 impl Palette {
@@ -77,30 +92,44 @@ impl Palette {
         };
         let scrim = Color::rgba(0, 0, 0, 0x66);
         if dark {
+            let flyout = Color::rgb(0x2C, 0x2C, 0x2C);
             Palette {
                 dark,
                 scrim,
                 accent,
+                accent_hover: accent.mix(flyout, 0.1),
                 on_accent: Color::rgb(0x00, 0x00, 0x00),
                 handle: Color::rgb(0x45, 0x45, 0x45),
                 handle_border: Color::rgba(0xFF, 0xFF, 0xFF, 0x24),
-                flyout: Color::rgb(0x2C, 0x2C, 0x2C),
+                flyout,
                 flyout_border: Color::rgba(0xFF, 0xFF, 0xFF, 0x17),
                 text: Color::rgb(0xFF, 0xFF, 0xFF),
                 text_secondary: Color::rgb(0xC5, 0xC5, 0xC5),
+                text_disabled: Color::rgb(0x78, 0x78, 0x78),
+                subtle_hover: Color::rgba(0xFF, 0xFF, 0xFF, 0x0F),
+                subtle_pressed: Color::rgba(0xFF, 0xFF, 0xFF, 0x0A),
+                divider: Color::rgb(0x3D, 0x3D, 0x3D),
+                swatch_ring: Color::rgba(0xFF, 0xFF, 0xFF, 0x4D),
             }
         } else {
+            let flyout = Color::rgb(0xF9, 0xF9, 0xF9);
             Palette {
                 dark,
                 scrim,
                 accent,
+                accent_hover: accent.mix(flyout, 0.1),
                 on_accent: Color::rgb(0xFF, 0xFF, 0xFF),
                 handle: Color::rgb(0xFF, 0xFF, 0xFF),
                 handle_border: Color::rgba(0x00, 0x00, 0x00, 0x33),
-                flyout: Color::rgb(0xF9, 0xF9, 0xF9),
+                flyout,
                 flyout_border: Color::rgba(0x00, 0x00, 0x00, 0x1A),
                 text: Color::rgb(0x1B, 0x1B, 0x1B),
                 text_secondary: Color::rgb(0x5F, 0x5F, 0x5F),
+                text_disabled: Color::rgb(0xA0, 0xA0, 0xA0),
+                subtle_hover: Color::rgba(0x00, 0x00, 0x00, 0x0A),
+                subtle_pressed: Color::rgba(0x00, 0x00, 0x00, 0x06),
+                divider: Color::rgb(0xE5, 0xE5, 0xE5),
+                swatch_ring: Color::rgba(0x00, 0x00, 0x00, 0x40),
             }
         }
     }

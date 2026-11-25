@@ -6,7 +6,7 @@ use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_RECT_F};
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, ID2D1DeviceContext, ID2D1Factory1, D2D1_DEVICE_CONTEXT_OPTIONS_NONE,
-    D2D1_FACTORY_OPTIONS, D2D1_FACTORY_TYPE_SINGLE_THREADED,
+    D2D1_FACTORY_OPTIONS, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE,
 };
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE, D3D_DRIVER_TYPE_WARP};
 use windows::Win32::Graphics::Direct3D11::{
@@ -51,6 +51,9 @@ impl Gfx {
                 D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, Some(&options))?;
             let device = factory.CreateDevice(&dxgi)?;
             let ctx = device.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)?;
+            // Grayscale like Windows 11 controls: ClearType fringes would
+            // show over translucent surfaces.
+            ctx.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
             let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
             Ok(Gfx {
                 d3d,

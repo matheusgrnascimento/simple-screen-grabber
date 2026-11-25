@@ -1,15 +1,17 @@
 //! The capture overlay: one borderless, topmost window over the virtual
-//! screen that shows the frozen screen and lets the user select an area.
+//! screen that shows the frozen screen, lets the user select an area and
+//! annotate it.
 //!
 //! The window, the devices and the swap chain are created at startup and
-//! kept hidden (and cloaked). A capture grabs the screen, uploads it to the
-//! GPU once, renders the first frame while still cloaked, then uncloaks:
-//! the overlay appears complete, with no flash. Closing hides it and
-//! releases the capture, the GPU bitmap and the swap chain buffers.
+//! kept hidden (and cloaked). A capture grabs the screen, uploads it once,
+//! renders the first frame while still cloaked, then uncloaks: the overlay
+//! appears complete, with no flash. Closing hides it and releases the
+//! capture, the bitmap and the swap chain buffers.
 
 mod layout;
 mod render;
 pub mod selection;
+mod toolbar;
 
 use std::time::Instant;
 
@@ -20,7 +22,7 @@ use windows::Win32::Graphics::Direct2D::Common::{
 };
 use windows::Win32::Graphics::Direct2D::{
     ID2D1Bitmap1, D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_NONE,
-    D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1, D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE,
+    D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1,
 };
 use windows::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute, DWMWA_CLOAK, DWMWA_TRANSITIONS_FORCEDISABLED,
@@ -36,22 +38,26 @@ use windows::Win32::Graphics::Dxgi::{
 };
 use windows::Win32::Graphics::Gdi::{InvalidateRect, ValidateRect};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_LEFT,
-    VK_RETURN, VK_RIGHT, VK_SHIFT, VK_UP,
+    GetKeyState, ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, TME_HOVER, TRACKMOUSEEVENT,
+    VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_OEM_4, VK_OEM_6, VK_RETURN, VK_RIGHT, VK_SHIFT,
+    VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, GetCursorPos, GetSystemMetrics, LoadCursorW, RegisterClassExW, SetCursor,
     SetForegroundWindow, SetWindowPos, ShowWindow, CS_DBLCLKS, HCURSOR, HTCLIENT, HWND_TOPMOST,
     IDC_ARROW, IDC_CROSS, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE,
-    SM_CXDRAG, SM_CYDRAG, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, WA_INACTIVE, WM_ACTIVATE,
-    WM_CAPTURECHANGED, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN,
-    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR,
-    WNDCLASSEXW, WNDPROC, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    SM_CXDRAG, SM_CYDRAG, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, WA_INACTIVE, WHEEL_DELTA,
+    WM_ACTIVATE, WM_CAPTURECHANGED, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN,
+    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT,
+    WM_SETCURSOR, WNDCLASSEXW, WNDPROC, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use self::selection::Handle;
+use self::toolbar::{Button, Hit, Toolbars};
+use crate::annotate::draw::ShapePainter;
+use crate::annotate::{History, PointF, Shape, Tool, COLORS, MAX_WIDTH, MIN_WIDTH};
 use crate::capture::{self, Capture, Timestamp};
-use crate::export::Image;
+use crate::export::{self, Image};
 use crate::fluent::Palette;
 use crate::geometry::{Point, Rect};
 use crate::gfx::Gfx;
@@ -59,8 +65,14 @@ use crate::log;
 use crate::win;
 
 const CLASS: PCWSTR = w!("SimpleScreenGrabber.Overlay");
+/// Sent after the mouse rests for the hover time (`TrackMouseEvent`); the
+/// constants live in the Common Controls bindings, not needed otherwise.
+const WM_MOUSEHOVER: u32 = 0x02A1;
+const HOVER_DEFAULT: u32 = 0xFFFF_FFFF;
 /// Swap chain size while hidden: the buffers are freed, not the chain.
 const IDLE_BUFFER: u32 = 8;
+/// The default stroke width in DIPs (multiplied by the monitor scale).
+const DEFAULT_WIDTH: f32 = 3.0;
 
 /// What the overlay asks the app to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -93,6 +105,13 @@ impl Reply {
             event: Some(event),
         }
     }
+
+    fn maybe(event: Option<Event>) -> Reply {
+        Reply {
+            result: Some(LRESULT(0)),
+            event,
+        }
+    }
 }
 
 /// What the left mouse button is doing.
@@ -116,6 +135,17 @@ pub enum Drag {
         handle: Handle,
         grab: Point,
     },
+    /// Drawing the shape in [`Session::drawing`].
+    Drawing,
+    /// Pressed on a toolbar item; it acts if released over the same item.
+    Pressing(Hit),
+}
+
+/// What the mouse is over, for hover effects.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hover {
+    Handle(Handle),
+    Toolbar(Hit),
 }
 
 /// One capture, from the shortcut until the overlay closes.
@@ -125,7 +155,17 @@ pub struct Session {
     selection: Option<Rect>,
     drag: Drag,
     mouse: Point,
-    hover: Option<Handle>,
+    hover: Option<Hover>,
+    tool: Option<Tool>,
+    /// Index in [`COLORS`].
+    color: usize,
+    /// Stroke width in pixels.
+    width: f32,
+    history: History,
+    drawing: Option<Shape>,
+    flyout_open: bool,
+    /// The button whose tooltip shows: the mouse rested on it.
+    tooltip: Option<Button>,
 }
 
 impl Session {
@@ -134,12 +174,83 @@ impl Session {
         self.capture.monitor_at(Point::new(x, y)).scale
     }
 
+    /// The toolbars, while a selection exists and is not being dragged.
+    fn toolbars(&self) -> Option<Toolbars> {
+        let sel = self.selection?;
+        if matches!(
+            self.drag,
+            Drag::Creating { .. } | Drag::Moving { .. } | Drag::Resizing { .. }
+        ) {
+            return None;
+        }
+        let monitor = self
+            .capture
+            .monitor_at(Point::new(sel.right - 1, sel.bottom - 1));
+        Some(toolbar::toolbars(
+            sel,
+            monitor.rect,
+            monitor.scale,
+            self.flyout_open,
+        ))
+    }
+
     fn handle_at(&self, p: Point) -> Option<Handle> {
         let sel = self.selection?;
         let scale = self.scale_at(p.x, p.y);
         let diameter = 2.0 * render::metrics::HANDLE_RADIUS * self.scale_at(sel.left, sel.top);
         let handles = selection::visible_handles(sel, diameter);
         selection::hit_handle(sel, handles, p, render::metrics::HANDLE_HIT * scale)
+    }
+
+    fn hover_at(&self, p: Point) -> Option<Hover> {
+        if let Some(hit) = self.toolbars().and_then(|bars| bars.hit(p)) {
+            return Some(Hover::Toolbar(hit));
+        }
+        self.handle_at(p).map(Hover::Handle)
+    }
+
+    fn is_enabled(&self, button: Button) -> bool {
+        match button {
+            Button::Undo => self.history.can_undo(),
+            Button::Redo => self.history.can_redo(),
+            _ => true,
+        }
+    }
+
+    fn select_tool(&mut self, tool: Tool) {
+        self.tool = if self.tool == Some(tool) {
+            None
+        } else {
+            Some(tool)
+        };
+        self.flyout_open = false;
+    }
+
+    fn set_width(&mut self, width: f32) {
+        self.width = width.clamp(MIN_WIDTH, MAX_WIDTH);
+    }
+
+    /// Runs a toolbar item; some ask the app to act.
+    fn activate(&mut self, hit: Hit) -> Option<Event> {
+        match hit {
+            Hit::Button(Button::Tool(tool)) => self.select_tool(tool),
+            Hit::Button(Button::Color) => self.flyout_open = !self.flyout_open,
+            Hit::Button(Button::Undo) => {
+                self.history.undo();
+            }
+            Hit::Button(Button::Redo) => {
+                self.history.redo();
+            }
+            Hit::Button(Button::Copy) => return Some(Event::Copy),
+            Hit::Button(Button::Save) => return Some(Event::Save),
+            Hit::Button(Button::Close) => return Some(Event::Close),
+            Hit::Swatch(i) => {
+                self.color = i;
+                self.flyout_open = false;
+            }
+            Hit::Background => {}
+        }
+        None
     }
 }
 
@@ -175,6 +286,7 @@ pub struct Overlay {
     swap_chain: IDXGISwapChain1,
     target: Option<ID2D1Bitmap1>,
     painter: render::Painter,
+    shapes: ShapePainter,
     palette: Palette,
     cursors: Cursors,
     session: Option<Session>,
@@ -245,17 +357,17 @@ impl Overlay {
                 .CreateSwapChainForHwnd(&gfx.d3d, hwnd, &desc, None, None)?;
             gfx.dxgi_factory
                 .MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER)?;
-            gfx.ctx
-                .SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
             chain
         };
         let painter = render::Painter::new(&gfx.ctx, &gfx.dwrite)?;
+        let shapes = ShapePainter::new(&gfx.ctx)?;
         Ok(Overlay {
             hwnd,
             gfx,
             swap_chain,
             target: None,
             painter,
+            shapes,
             palette,
             cursors: Cursors::load()?,
             session: None,
@@ -278,6 +390,7 @@ impl Overlay {
         }
         let mouse = Point::new(cursor.x - capture.origin.x, cursor.y - capture.origin.y);
         let (origin, width, height) = (capture.origin, capture.width, capture.height);
+        let scale = capture.monitor_at(mouse).scale;
         self.session = Some(Session {
             capture,
             bitmap,
@@ -285,6 +398,13 @@ impl Overlay {
             drag: Drag::None,
             mouse,
             hover: None,
+            tool: None,
+            color: 0,
+            width: (DEFAULT_WIDTH * scale).round(),
+            history: History::default(),
+            drawing: None,
+            flyout_open: false,
+            tooltip: None,
         });
         // SAFETY: positions and shows this thread's window while it is
         // still cloaked, so nothing appears yet.
@@ -322,13 +442,28 @@ impl Overlay {
     }
 
     /// The image to save or copy: the selection, or the whole monitor under
-    /// the mouse when nothing is selected. Taken before the overlay closes.
-    pub fn export(&self) -> Option<(Image, Timestamp)> {
+    /// the mouse when nothing is selected, with the annotations. Taken
+    /// before the overlay closes; `None` when no capture is open.
+    pub fn export(&self) -> Option<Result<(Image, Timestamp)>> {
         let session = self.session.as_ref()?;
         let area = session
             .selection
             .unwrap_or_else(|| session.capture.monitor_at(session.mouse).rect);
-        Some((Image::crop(&session.capture, area), session.capture.time))
+        let shapes = session.history.shapes();
+        let touched = shapes.iter().any(|shape| {
+            let (min, max) = shape.bounds();
+            min.x < area.right as f32
+                && max.x > area.left as f32
+                && min.y < area.bottom as f32
+                && max.y > area.top as f32
+        });
+        let image = if touched {
+            export::render(&self.gfx.ctx, &self.shapes, &session.bitmap, shapes, area)
+        } else {
+            // Nothing drawn here: copy the captured pixels directly.
+            Ok(Image::crop(&session.capture, area))
+        };
+        Some(image.map(|image| (image, session.capture.time)))
     }
 
     /// Hides the overlay and frees the capture.
@@ -347,7 +482,7 @@ impl Overlay {
         }
     }
 
-    /// Uploads the captured pixels to the GPU.
+    /// Uploads the captured pixels for drawing.
     fn upload(&self, capture: &Capture) -> Result<ID2D1Bitmap1> {
         let props = D2D1_BITMAP_PROPERTIES1 {
             pixelFormat: D2D1_PIXEL_FORMAT {
@@ -430,7 +565,9 @@ impl Overlay {
             ctx.BeginDraw();
         }
         let drawn = match &self.session {
-            Some(session) => self.painter.frame(&ctx, session, &self.palette),
+            Some(session) => self
+                .painter
+                .frame(&ctx, session, &self.shapes, &self.palette),
             None => Ok(()),
         };
         // SAFETY: closes the BeginDraw above, then presents with vsync.
@@ -474,30 +611,48 @@ impl Overlay {
                 self.mouse_move(point(lparam));
                 Reply::handled(0)
             }
+            WM_MOUSEHOVER => {
+                if let Some(session) = &mut self.session {
+                    if let (Drag::None, Some(Hover::Toolbar(Hit::Button(button)))) =
+                        (session.drag, session.hover)
+                    {
+                        session.tooltip = Some(button);
+                        self.invalidate();
+                    }
+                }
+                Reply::handled(0)
+            }
             WM_LBUTTONDOWN => {
                 self.button_down(point(lparam));
                 Reply::handled(0)
             }
-            WM_LBUTTONUP => {
-                self.button_up(point(lparam));
-                Reply::handled(0)
-            }
+            WM_LBUTTONUP => Reply::maybe(self.button_up(point(lparam))),
             WM_LBUTTONDBLCLK => {
                 let p = point(lparam);
-                let inside = self
-                    .session
-                    .as_ref()
-                    .and_then(|s| s.selection)
-                    .is_some_and(|sel| sel.contains(p));
-                if inside {
+                let copy = self.session.as_ref().is_some_and(|s| {
+                    s.tool.is_none()
+                        && s.selection.is_some_and(|sel| sel.contains(p))
+                        && s.toolbars().and_then(|bars| bars.hit(p)).is_none()
+                });
+                if copy {
                     Reply::event(Event::Copy)
                 } else {
+                    // The second click of a double-click still counts.
+                    self.button_down(p);
                     Reply::handled(0)
                 }
             }
+            WM_MOUSEWHEEL => {
+                let notches = i32::from((wparam.0 >> 16) as u16 as i16) / WHEEL_DELTA as i32;
+                if let Some(session) = &mut self.session {
+                    session.set_width(session.width + notches as f32);
+                    self.invalidate();
+                }
+                Reply::handled(0)
+            }
             WM_CAPTURECHANGED => {
                 if lparam.0 != self.hwnd.0 as isize {
-                    self.end_drag();
+                    self.cancel_drag();
                 }
                 Reply::handled(0)
             }
@@ -517,26 +672,26 @@ impl Overlay {
         let Some(session) = &self.session else {
             return;
         };
-        let handle = match session.drag {
-            Drag::Resizing { handle, .. } => Some(handle),
-            Drag::None => session.handle_at(session.mouse),
+        let handle = match (session.drag, session.hover) {
+            (Drag::Resizing { handle, .. }, _) => Some(handle),
+            (Drag::None, Some(Hover::Handle(handle))) => Some(handle),
             _ => None,
         };
+        let on_toolbar = matches!(session.drag, Drag::Pressing(_))
+            || (session.drag == Drag::None && matches!(session.hover, Some(Hover::Toolbar(_))));
         let moving = matches!(session.drag, Drag::Moving { .. })
             || (session.drag == Drag::None
+                && session.tool.is_none()
                 && session.selection.is_some_and(|s| s.contains(session.mouse)));
         let cursor = match handle {
             Some(h) if h.is_nwse() => self.cursors.nwse,
             Some(h) if h.is_nesw() => self.cursors.nesw,
             Some(h) if h.is_horizontal() => self.cursors.we,
             Some(_) => self.cursors.ns,
+            None if on_toolbar => self.cursors.arrow,
             None if moving => self.cursors.move_all,
-            None if matches!(session.drag, Drag::Creating { .. } | Drag::Pending { .. }) => {
-                self.cursors.cross
-            }
             None => self.cursors.cross,
         };
-        let _ = self.cursors.arrow;
         // SAFETY: sets a shared system cursor.
         unsafe { SetCursor(Some(cursor)) };
     }
@@ -546,15 +701,35 @@ impl Overlay {
             return;
         };
         session.mouse = p;
-        session.drag = match (session.handle_at(p), session.selection) {
-            (Some(handle), Some(start)) => Drag::Resizing {
+        session.tooltip = None;
+        if let Some(hit) = session.toolbars().and_then(|bars| bars.hit(p)) {
+            session.drag = Drag::Pressing(hit);
+        } else if session.flyout_open {
+            // A click outside the open flyout only closes it.
+            session.flyout_open = false;
+            session.drag = Drag::None;
+            self.invalidate();
+            return;
+        } else if let (Some(handle), Some(start)) = (session.handle_at(p), session.selection) {
+            session.drag = Drag::Resizing {
                 start,
                 handle,
                 grab: p,
-            },
-            (None, Some(start)) if start.contains(p) => Drag::Moving { start, grab: p },
-            _ => Drag::Pending { anchor: p },
-        };
+            };
+        } else if let (Some(tool), Some(_)) = (session.tool, session.selection) {
+            let color = COLORS[session.color].0;
+            session.drawing = Some(Shape::new(
+                tool,
+                color,
+                session.width,
+                PointF::center(p.x, p.y),
+            ));
+            session.drag = Drag::Drawing;
+        } else if let Some(start) = session.selection.filter(|s| s.contains(p)) {
+            session.drag = Drag::Moving { start, grab: p };
+        } else {
+            session.drag = Drag::Pending { anchor: p };
+        }
         // SAFETY: captures the mouse for this thread's window.
         unsafe { SetCapture(self.hwnd) };
         self.invalidate();
@@ -568,10 +743,18 @@ impl Overlay {
         let bounds = session.capture.bounds();
         let clamped = bounds.clamp(p);
         match session.drag {
-            Drag::None => {
-                let hover = session.handle_at(p);
+            Drag::None | Drag::Pressing(_) => {
+                let hover = session.hover_at(p);
+                // The brush outline follows the mouse while a tool is on.
+                let follow = session.tool.is_some() && session.drag == Drag::None;
                 if hover != session.hover {
                     session.hover = hover;
+                    session.tooltip = None;
+                    if matches!(hover, Some(Hover::Toolbar(Hit::Button(_)))) {
+                        track_hover(self.hwnd);
+                    }
+                    self.invalidate();
+                } else if follow {
                     self.invalidate();
                 }
                 return;
@@ -587,7 +770,9 @@ impl Overlay {
                 session.drag = Drag::Creating { anchor };
                 session.selection = Some(Rect::spanning(anchor, clamped));
             }
-            Drag::Creating { anchor } => session.selection = Some(Rect::spanning(anchor, clamped)),
+            Drag::Creating { anchor } => {
+                session.selection = Some(Rect::spanning(anchor, clamped));
+            }
             Drag::Moving { start, grab } => {
                 session.selection =
                     Some(selection::moved(start, p.x - grab.x, p.y - grab.y, bounds));
@@ -605,26 +790,57 @@ impl Overlay {
                     bounds,
                 ));
             }
+            Drag::Drawing => {
+                // SAFETY: reads the keyboard state of this thread.
+                let shift = unsafe { GetKeyState(i32::from(VK_SHIFT.0)) } < 0;
+                if let Some(shape) = &mut session.drawing {
+                    shape.extend(PointF::center(p.x, p.y), shift);
+                }
+            }
         }
         self.invalidate();
     }
 
-    fn button_up(&mut self, p: Point) {
-        if let Some(session) = &mut self.session {
-            session.mouse = p;
-        }
+    fn button_up(&mut self, p: Point) -> Option<Event> {
         // SAFETY: releases the mouse captured in button_down.
         unsafe {
             let _ = ReleaseCapture();
         }
-        self.end_drag();
+        let session = self.session.as_mut()?;
+        session.mouse = p;
+        let mut event = None;
+        match session.drag {
+            Drag::Pressing(hit) => {
+                if session.toolbars().and_then(|bars| bars.hit(p)) == Some(hit) {
+                    let enabled = match hit {
+                        Hit::Button(b) => session.is_enabled(b),
+                        _ => true,
+                    };
+                    if enabled {
+                        event = session.activate(hit);
+                    }
+                }
+            }
+            Drag::Drawing => {
+                if let Some(shape) = session.drawing.take().filter(Shape::is_visible) {
+                    session.history.push(shape);
+                }
+            }
+            _ => {}
+        }
+        session.drag = Drag::None;
+        session.hover = session.hover_at(p);
+        self.invalidate();
+        event
     }
 
-    fn end_drag(&mut self) {
+    /// Ends a drag without finishing it (the mouse capture was lost).
+    fn cancel_drag(&mut self) {
         if let Some(session) = &mut self.session {
             if session.drag != Drag::None {
                 session.drag = Drag::None;
-                session.hover = session.handle_at(session.mouse);
+                session.drawing = None;
+                session.hover = session.hover_at(session.mouse);
                 self.invalidate();
             }
         }
@@ -632,32 +848,80 @@ impl Overlay {
 
     fn key_down(&mut self, key: u16) -> Reply {
         // SAFETY: reads the keyboard state of this thread.
-        let ctrl = unsafe { GetKeyState(i32::from(VK_CONTROL.0)) } < 0;
-        match key {
-            k if k == VK_ESCAPE.0 => return Reply::event(Event::Close),
-            k if k == VK_RETURN.0 => return Reply::event(Event::Copy),
-            k if ctrl && k == u16::from(b'C') => return Reply::event(Event::Copy),
-            k if ctrl && k == u16::from(b'S') => return Reply::event(Event::Save),
-            _ => {}
-        }
+        let (ctrl, shift) = unsafe {
+            (
+                GetKeyState(i32::from(VK_CONTROL.0)) < 0,
+                GetKeyState(i32::from(VK_SHIFT.0)) < 0,
+            )
+        };
         let Some(session) = &mut self.session else {
             return Reply::default();
         };
-        // SAFETY: reads the keyboard state of this thread.
-        let shift = unsafe { GetKeyState(i32::from(VK_SHIFT.0)) } < 0;
-        let step = if shift { 10 } else { 1 };
-        let (dx, dy) = match key {
-            k if k == VK_LEFT.0 => (-step, 0),
-            k if k == VK_RIGHT.0 => (step, 0),
-            k if k == VK_UP.0 => (0, -step),
-            k if k == VK_DOWN.0 => (0, step),
+        let busy = session.drag != Drag::None;
+        match key {
+            k if k == VK_ESCAPE.0 => {
+                if session.flyout_open {
+                    session.flyout_open = false;
+                } else {
+                    return Reply::event(Event::Close);
+                }
+            }
+            k if k == VK_RETURN.0 => return Reply::event(Event::Copy),
+            k if ctrl && k == u16::from(b'C') => return Reply::event(Event::Copy),
+            k if ctrl && k == u16::from(b'S') => return Reply::event(Event::Save),
+            k if ctrl && !busy && k == u16::from(b'Z') => {
+                if shift {
+                    session.history.redo();
+                } else {
+                    session.history.undo();
+                }
+            }
+            k if ctrl && !busy && k == u16::from(b'Y') => {
+                session.history.redo();
+            }
+            k if !ctrl && Tool::from_key(k).is_some() => {
+                if let Some(tool) = Tool::from_key(k) {
+                    session.select_tool(tool);
+                }
+            }
+            k if !ctrl && (u16::from(b'1')..=u16::from(b'8')).contains(&k) => {
+                session.color = usize::from(k - u16::from(b'1'));
+                session.flyout_open = false;
+            }
+            k if k == VK_OEM_4.0 => session.set_width(session.width - 1.0),
+            k if k == VK_OEM_6.0 => session.set_width(session.width + 1.0),
+            k if [VK_LEFT.0, VK_RIGHT.0, VK_UP.0, VK_DOWN.0].contains(&k) => {
+                let step = if shift { 10 } else { 1 };
+                let (dx, dy) = match k {
+                    k if k == VK_LEFT.0 => (-step, 0),
+                    k if k == VK_RIGHT.0 => (step, 0),
+                    k if k == VK_UP.0 => (0, -step),
+                    _ => (0, step),
+                };
+                if let (Some(sel), false) = (session.selection, busy) {
+                    session.selection =
+                        Some(selection::moved(sel, dx, dy, session.capture.bounds()));
+                }
+            }
             _ => return Reply::default(),
-        };
-        if let (Some(sel), Drag::None) = (session.selection, session.drag) {
-            session.selection = Some(selection::moved(sel, dx, dy, session.capture.bounds()));
-            self.invalidate();
         }
+        self.invalidate();
         Reply::handled(0)
+    }
+}
+
+/// Asks for one WM_MOUSEHOVER after the mouse rests for the system hover
+/// time.
+fn track_hover(hwnd: HWND) {
+    let mut track = TRACKMOUSEEVENT {
+        cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
+        dwFlags: TME_HOVER,
+        hwndTrack: hwnd,
+        dwHoverTime: HOVER_DEFAULT,
+    };
+    // SAFETY: the structure is initialized for this thread's window.
+    unsafe {
+        let _ = TrackMouseEvent(&mut track);
     }
 }
 
@@ -677,5 +941,162 @@ fn set_dwm_bool(hwnd: HWND, attribute: u32, value: bool) {
             (&value as *const BOOL).cast(),
             size_of::<BOOL>() as u32,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::capture::Monitor;
+
+    /// A synthetic screen: a light desktop with a window, lines of "text"
+    /// and a colored picture. No real screen content.
+    fn screen(width: i32, height: i32) -> Capture {
+        let mut pixels = vec![0u8; width as usize * height as usize * 4];
+        for y in 0..height {
+            for x in 0..width {
+                let at = (y as usize * width as usize + x as usize) * 4;
+                let (wx, wy) = (x - width / 8, y - height / 8);
+                let inside = wx >= 0 && wy >= 0 && wx < width * 3 / 4 && wy < height * 3 / 4;
+                let color: [u8; 3] = if !inside {
+                    [0x8A, 0x6A, 0x3C] // desktop (BGR)
+                } else if wy < 32 {
+                    [0xF3, 0xF3, 0xF3] // title bar
+                } else if wx > width * 3 / 8 && wy > 60 && wy < 60 + height / 3 {
+                    let t = (wx + wy) as u8;
+                    [t, 0x80u8.wrapping_add(t / 2), 0xC0] // picture
+                } else if (wy - 50) % 22 < 9 && wx > 24 && wx < width * 3 / 8 - 24 - (wy % 7) * 9 {
+                    [0x30, 0x30, 0x30] // text line
+                } else {
+                    [0xFF, 0xFF, 0xFF] // page
+                };
+                pixels[at..at + 3].copy_from_slice(&color);
+            }
+        }
+        let monitor = Monitor {
+            rect: Rect::new(0, 0, width, height),
+            scale: 1.0,
+        };
+        Capture::synthetic(width, height, vec![monitor], pixels)
+    }
+
+    #[test]
+    #[ignore = "writes preview images to SIMPLE_SCREEN_GRABBER_PREVIEW"]
+    fn render_previews() {
+        let Ok(folder) = std::env::var("SIMPLE_SCREEN_GRABBER_PREVIEW") else {
+            return;
+        };
+        // SAFETY: COM for this test thread.
+        let _ = unsafe {
+            windows::Win32::System::Com::CoInitializeEx(
+                None,
+                windows::Win32::System::Com::COINIT_MULTITHREADED,
+            )
+        };
+        let gfx = Gfx::new().unwrap();
+        let mut painter = render::Painter::new(&gfx.ctx, &gfx.dwrite).unwrap();
+        let shapes = ShapePainter::new(&gfx.ctx).unwrap();
+        for (name, dark, scale) in [("light-100", false, 1.0), ("dark-150", true, 1.5)] {
+            let (w, h) = ((1280.0 * scale) as i32, (800.0 * scale) as i32);
+            let mut capture = screen(w, h);
+            capture.monitors[0].scale = scale;
+            let props = D2D1_BITMAP_PROPERTIES1 {
+                pixelFormat: D2D1_PIXEL_FORMAT {
+                    format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    alphaMode: D2D1_ALPHA_MODE_IGNORE,
+                },
+                dpiX: 96.0,
+                dpiY: 96.0,
+                bitmapOptions: D2D1_BITMAP_OPTIONS_NONE,
+                ..Default::default()
+            };
+            let size = D2D_SIZE_U {
+                width: w as u32,
+                height: h as u32,
+            };
+            // SAFETY: the pixels outlive the call, which copies them.
+            let bitmap = unsafe {
+                gfx.ctx
+                    .CreateBitmap(
+                        size,
+                        Some(capture.pixels().as_ptr().cast()),
+                        capture.stride() as u32,
+                        &props,
+                    )
+                    .unwrap()
+            };
+            let px = |v: f32| (v * scale) as i32;
+            let sel = Rect::new(px(220.0), px(150.0), px(860.0), px(560.0));
+            let mut history = History::default();
+            let mut add = |tool, color: usize, a: (f32, f32), b: &[(f32, f32)]| {
+                let mut shape = Shape::new(
+                    tool,
+                    COLORS[color].0,
+                    3.0 * scale,
+                    PointF::new(a.0 * scale, a.1 * scale),
+                );
+                for p in b {
+                    shape.extend(PointF::new(p.0 * scale, p.1 * scale), false);
+                }
+                history.push(shape);
+            };
+            add(Tool::Arrow, 0, (300.0, 470.0), &[(430.0, 380.0)]);
+            add(Tool::Rectangle, 4, (520.0, 220.0), &[(760.0, 330.0)]);
+            add(Tool::Line, 3, (260.0, 520.0), &[(500.0, 520.0)]);
+            add(
+                Tool::Highlighter,
+                2,
+                (262.0, 213.0),
+                &[(330.0, 213.0), (420.0, 213.0)],
+            );
+            add(
+                Tool::Pen,
+                5,
+                (600.0, 420.0),
+                &[
+                    (620.0, 400.0),
+                    (650.0, 395.0),
+                    (680.0, 410.0),
+                    (700.0, 440.0),
+                    (690.0, 470.0),
+                ],
+            );
+            let mut session = Session {
+                capture,
+                bitmap,
+                selection: Some(sel),
+                drag: Drag::None,
+                mouse: Point::new(px(700.0), px(260.0)),
+                hover: Some(Hover::Toolbar(Hit::Button(Button::Tool(Tool::Rectangle)))),
+                tool: Some(Tool::Arrow),
+                color: 0,
+                width: 3.0 * scale,
+                history,
+                drawing: None,
+                flyout_open: dark,
+                tooltip: (!dark).then_some(Button::Save),
+            };
+            if !dark {
+                session.hover = Some(Hover::Toolbar(Hit::Button(Button::Save)));
+            }
+            let palette = Palette::new(dark, None);
+            // SAFETY: one BeginDraw/EndDraw pair on an offscreen target.
+            let image = unsafe {
+                let target = gfx
+                    .ctx
+                    .CreateBitmap(size, None, 0, &export::target_properties())
+                    .unwrap();
+                gfx.ctx.SetTarget(&target);
+                gfx.ctx.BeginDraw();
+                painter
+                    .frame(&gfx.ctx, &session, &shapes, &palette)
+                    .unwrap();
+                gfx.ctx.EndDraw(None, None).unwrap();
+                gfx.ctx.SetTarget(None);
+                export::read_back(&gfx.ctx, &target, size).unwrap()
+            };
+            let path = std::path::Path::new(&folder).join(format!("overlay-{name}.png"));
+            export::png::write_file(&image, &path).unwrap();
+        }
     }
 }

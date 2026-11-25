@@ -7,10 +7,23 @@ use std::path::{Path, PathBuf};
 
 use windows::core::{Error, Result, HRESULT};
 use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS};
+use windows::Win32::Graphics::Direct2D::Common::{
+    D2D1_ALPHA_MODE_IGNORE, D2D1_PIXEL_FORMAT, D2D_SIZE_U,
+};
+use windows::Win32::Graphics::Direct2D::{
+    ID2D1Bitmap1, ID2D1DeviceContext, D2D1_BITMAP_OPTIONS, D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+    D2D1_BITMAP_OPTIONS_CPU_READ, D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1,
+    D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, D2D1_MAP_OPTIONS_READ,
+};
+use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH, MOVE_FILE_FLAGS};
+use windows_numerics::Matrix3x2;
 
+use crate::annotate::draw::ShapePainter;
+use crate::annotate::Shape;
 use crate::capture::{Capture, Timestamp};
 use crate::geometry::Rect;
+use crate::gfx;
 use crate::paths;
 use crate::win;
 
@@ -47,6 +60,111 @@ impl Image {
             pixels,
         }
     }
+}
+
+fn bitmap_properties(options: D2D1_BITMAP_OPTIONS) -> D2D1_BITMAP_PROPERTIES1 {
+    D2D1_BITMAP_PROPERTIES1 {
+        pixelFormat: D2D1_PIXEL_FORMAT {
+            format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            alphaMode: D2D1_ALPHA_MODE_IGNORE,
+        },
+        dpiX: 96.0,
+        dpiY: 96.0,
+        bitmapOptions: options,
+        ..Default::default()
+    }
+}
+
+/// Draws `area` of the screen with the annotations at native resolution,
+/// with the same drawing code as the overlay, and reads it back. The screen
+/// is drawn 1:1 with nearest-neighbor sampling, so pixels away from the
+/// annotations keep their exact values.
+pub fn render(
+    ctx: &ID2D1DeviceContext,
+    painter: &ShapePainter,
+    screen: &ID2D1Bitmap1,
+    shapes: &[Shape],
+    area: Rect,
+) -> Result<Image> {
+    let (width, height) = (area.width() as u32, area.height() as u32);
+    let size = D2D_SIZE_U { width, height };
+    let base = Matrix3x2::translation(-(area.left as f32), -(area.top as f32));
+    // SAFETY: one BeginDraw/EndDraw pair on this thread's context; the
+    // mapped memory is read within its pitch and unmapped.
+    unsafe {
+        let target = ctx.CreateBitmap(
+            size,
+            None,
+            0,
+            &bitmap_properties(D2D1_BITMAP_OPTIONS_TARGET),
+        )?;
+        ctx.SetTarget(&target);
+        ctx.BeginDraw();
+        ctx.SetTransform(&base);
+        ctx.DrawBitmap(
+            screen,
+            None,
+            1.0,
+            D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
+            None,
+            None,
+        );
+        painter.draw(
+            ctx,
+            shapes,
+            gfx::rect_f(
+                area.left as f32,
+                area.top as f32,
+                area.right as f32,
+                area.bottom as f32,
+            ),
+            &base,
+        );
+        let ended = ctx.EndDraw(None, None);
+        ctx.SetTarget(None);
+        ended?;
+        read_back(ctx, &target, size)
+    }
+}
+
+/// Copies a drawn bitmap to memory as an opaque image.
+pub fn read_back(
+    ctx: &ID2D1DeviceContext,
+    bitmap: &ID2D1Bitmap1,
+    size: D2D_SIZE_U,
+) -> Result<Image> {
+    // SAFETY: the mapped memory is read within its pitch and unmapped.
+    unsafe {
+        let readable = ctx.CreateBitmap(
+            size,
+            None,
+            0,
+            &bitmap_properties(D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW),
+        )?;
+        readable.CopyFromBitmap(None, bitmap, None)?;
+        let mapped = readable.Map(D2D1_MAP_OPTIONS_READ)?;
+        let row = size.width as usize * 4;
+        let mut pixels = Vec::with_capacity(row * size.height as usize);
+        for y in 0..size.height as usize {
+            let line = std::slice::from_raw_parts(mapped.bits.add(y * mapped.pitch as usize), row);
+            pixels.extend_from_slice(line);
+        }
+        readable.Unmap()?;
+        for alpha in pixels.iter_mut().skip(3).step_by(4) {
+            *alpha = 0xFF;
+        }
+        Ok(Image {
+            width: size.width,
+            height: size.height,
+            pixels,
+        })
+    }
+}
+
+/// Properties of a drawable bitmap in the screen's pixel format.
+#[cfg(test)]
+pub fn target_properties() -> D2D1_BITMAP_PROPERTIES1 {
+    bitmap_properties(D2D1_BITMAP_OPTIONS_TARGET)
 }
 
 /// Writes `image` as a PNG file in `folder`, named after `time`, without
@@ -135,6 +253,58 @@ mod tests {
     fn crop_is_clipped_to_the_capture() {
         let image = Image::crop(&capture(10, 10), Rect::new(8, 8, 20, 20));
         assert_eq!((image.width, image.height), (2, 2));
+    }
+
+    /// Uploads a capture the way the overlay does.
+    fn upload(gfx: &gfx::Gfx, capture: &Capture) -> ID2D1Bitmap1 {
+        // SAFETY: the pixels outlive the call, which copies them.
+        unsafe {
+            gfx.ctx
+                .CreateBitmap(
+                    D2D_SIZE_U {
+                        width: capture.width as u32,
+                        height: capture.height as u32,
+                    },
+                    Some(capture.pixels().as_ptr().cast()),
+                    capture.stride() as u32,
+                    &bitmap_properties(
+                        windows::Win32::Graphics::Direct2D::D2D1_BITMAP_OPTIONS_NONE,
+                    ),
+                )
+                .unwrap()
+        }
+    }
+
+    #[test]
+    fn rendering_without_annotations_keeps_every_pixel() {
+        let gfx = gfx::Gfx::new().unwrap();
+        let painter = ShapePainter::new(&gfx.ctx).unwrap();
+        let capture = capture(97, 61);
+        let screen = upload(&gfx, &capture);
+        let area = Rect::new(13, 7, 90, 55);
+        let rendered = render(&gfx.ctx, &painter, &screen, &[], area).unwrap();
+        assert_eq!(rendered.pixels, Image::crop(&capture, area).pixels);
+    }
+
+    #[test]
+    fn annotations_change_only_the_pixels_they_cover() {
+        use crate::annotate::{PointF, Tool, COLORS};
+        let gfx = gfx::Gfx::new().unwrap();
+        let painter = ShapePainter::new(&gfx.ctx).unwrap();
+        let capture = capture(120, 80);
+        let screen = upload(&gfx, &capture);
+        let mut line = Shape::new(Tool::Line, COLORS[0].0, 3.0, PointF::center(10, 40));
+        line.extend(PointF::center(100, 40), false);
+        let area = Rect::new(0, 0, 120, 80);
+        let rendered = render(&gfx.ctx, &painter, &screen, &[line], area).unwrap();
+        let original = Image::crop(&capture, area);
+        let at =
+            |image: &Image, x: usize, y: usize| image.pixels[(y * 120 + x) * 4..][..4].to_vec();
+        // On the line: red.
+        assert_eq!(at(&rendered, 50, 40), vec![0x4B, 0x4B, 0xFF, 0xFF]);
+        // Far from it: unchanged.
+        assert_eq!(at(&rendered, 50, 10), at(&original, 50, 10));
+        assert_eq!(at(&rendered, 5, 70), at(&original, 5, 70));
     }
 
     #[test]

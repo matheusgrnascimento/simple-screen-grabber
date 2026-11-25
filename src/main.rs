@@ -3,6 +3,7 @@
 
 #![windows_subsystem = "windows"]
 
+mod annotate;
 mod app;
 mod capture;
 mod export;

@@ -376,12 +376,15 @@ impl App {
     fn copy(&mut self) {
         let image = self.overlay.export();
         self.overlay.close();
-        if let Some((image, _)) = image {
-            if let Err(err) = self.clipboard.copy(self.host, image) {
-                log!("copy failed: {err}");
-                self.tray
-                    .notify("Couldn't copy the screenshot", &err.message());
-            }
+        let copied = match image {
+            Some(Ok((image, _))) => self.clipboard.copy(self.host, image),
+            Some(Err(err)) => Err(err),
+            None => Ok(()),
+        };
+        if let Err(err) = copied {
+            log!("copy failed: {err}");
+            self.tray
+                .notify("Couldn't copy the screenshot", &err.message());
         }
     }
 
@@ -390,8 +393,15 @@ impl App {
     fn save(&mut self) {
         let image = self.overlay.export();
         self.overlay.close();
-        let Some((image, time)) = image else {
-            return;
+        let (image, time) = match image {
+            Some(Ok(image)) => image,
+            Some(Err(err)) => {
+                log!("export failed: {err}");
+                self.tray
+                    .notify("Couldn't save the screenshot", &err.message());
+                return;
+            }
+            None => return,
         };
         let Some(folder) = self.save_folder() else {
             self.tray.notify(

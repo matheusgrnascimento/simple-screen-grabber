@@ -145,13 +145,10 @@ impl RectF {
         self.bottom - self.top
     }
 
-    pub fn offset(&self, dx: f32, dy: f32) -> RectF {
-        RectF::new(
-            self.left + dx,
-            self.top + dy,
-            self.right + dx,
-            self.bottom + dy,
-        )
+    /// Whether the center of the pixel at `p` is inside.
+    pub fn contains(&self, p: Point) -> bool {
+        let (x, y) = (p.x as f32 + 0.5, p.y as f32 + 0.5);
+        x >= self.left && x < self.right && y >= self.top && y < self.bottom
     }
 
     /// The rectangle with its edges rounded to whole pixels.
