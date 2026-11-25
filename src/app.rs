@@ -123,6 +123,8 @@ struct App {
     notification: NotificationAction,
     /// The settings window, while open.
     settings: Option<Settings>,
+    /// Screenshots being written; the app waits for them before it exits.
+    saves: Vec<std::thread::JoinHandle<()>>,
 }
 
 /// What a click on a notification does.
@@ -206,6 +208,7 @@ pub fn run(options: Options) -> Result<()> {
         taskbar_created,
         notification: NotificationAction::None,
         settings: None,
+        saves: Vec::new(),
     };
     app.register_hotkey();
     app.report_problems(config_problems);
@@ -223,8 +226,12 @@ pub fn run(options: Options) -> Result<()> {
 
     let result = message_loop();
 
-    // Leave a copied image on the clipboard after exit.
-    with_app(|app| app.clipboard.render_all(app.host));
+    // Leave a copied image on the clipboard after exit, and let the
+    // screenshots being saved finish.
+    with_app(|app| {
+        app.clipboard.render_all(app.host);
+        app.finish_saves();
+    });
     // Drop the app (tray icon, shortcut) before its window.
     APP.with(|cell| cell.borrow_mut().take());
     // SAFETY: the host window belongs to this thread.
@@ -410,6 +417,7 @@ impl App {
             WM_QUERYENDSESSION => return Some(LRESULT(1)),
             WM_ENDSESSION if wparam.0 != 0 => {
                 self.clipboard.render_all(self.host);
+                self.finish_saves();
                 if lparam.0 as u32 & ENDSESSION_CLOSEAPP != 0 {
                     // SAFETY: as above.
                     unsafe { PostQuitMessage(0) };
@@ -783,7 +791,16 @@ impl App {
             );
             return;
         };
-        spawn_save(PostTarget(self.host), image, folder, time);
+        self.saves.retain(|save| !save.is_finished());
+        self.saves
+            .push(spawn_save(PostTarget(self.host), image, folder, time));
+    }
+
+    /// Waits for the screenshots still being written.
+    fn finish_saves(&mut self) {
+        for save in self.saves.drain(..) {
+            let _ = save.join();
+        }
     }
 
     fn saved(&mut self, result: Result<PathBuf>) {
@@ -815,7 +832,12 @@ impl App {
 
 /// Encodes and writes the PNG on its own thread, then posts the result to
 /// the host window.
-fn spawn_save(target: PostTarget, image: Image, folder: PathBuf, time: Timestamp) {
+fn spawn_save(
+    target: PostTarget,
+    image: Image,
+    folder: PathBuf,
+    time: Timestamp,
+) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let target = target;
         // SAFETY: COM for this thread, balanced by CoUninitialize below.
@@ -841,7 +863,7 @@ fn spawn_save(target: PostTarget, image: Image, folder: PathBuf, time: Timestamp
                 drop(Box::from_raw(raw));
             }
         }
-    });
+    })
 }
 
 /// Opens a folder in File Explorer.
