@@ -2,7 +2,7 @@
 
 A native Windows screenshot tool: press a shortcut, select an area, annotate it, then save or copy it. Inspired by the capture-and-annotate flow of Lightshot, without any upload or sharing.
 
-This document records the decisions made before implementation. Nothing here is built yet.
+This document records the decisions made before implementation. v1 is implemented (milestones M0 to M8); what was measured and what changed along the way is in [Implementation notes](#implementation-notes) at the end.
 
 ## Priorities
 
@@ -243,5 +243,37 @@ Each milestone builds, passes clippy and tests, and is usable on its own.
 
 ## Open points
 
-- Single-letter tool shortcuts (A, R, L, P, H).
-- Exact palette values.
+- Single-letter tool shortcuts (A, R, L, P, H): implemented as proposed.
+- Exact palette values: implemented as listed.
+
+## Implementation notes
+
+What changed from the plan during implementation, and why.
+
+### Measured (3440x1440 desktop, `--bench`)
+
+| Target | Result |
+|---|---|
+| Shortcut to overlay visible < 30 ms | The screen dims in 7.6 ms; the frozen, interactive overlay follows at 55 ms (60 ms right after a working set trim). Not met for the frozen overlay: see below |
+| Input to updated frame < 1 frame | 2.0 ms per frame |
+| Overlay closes after Ctrl+S immediately | Yes: encoding (about 40 ms for 2136x936) runs on a worker thread |
+| CPU while idle 0% | 0 |
+| RAM while idle (working set) ≤ 5 MB | 0.2 MB (trimmed); 15.6 MB untrimmed, mostly shared system DLLs. Private memory: 3.3 MB, 27.7 MB after the first capture |
+| Executable < 1 MB | About 470 KB |
+
+### Decisions that changed
+
+- **Direct2D on WARP, not the GPU.** A hardware Direct3D device took 240 ms and 52 MB of private memory that the GPU driver keeps even after release (the idle app went from 3.5 MB to 52.9 MB). WARP, the software rasterizer of Windows, is created in 16 ms with 2.6 MB and draws a full frame in about 2 ms, with the same Direct2D output.
+- **Instant dimming before the copy.** The GDI copy of the screen takes 30 to 40 ms at this size, with or without `CAPTUREBLT` (kept: it includes layered windows); copying in parallel stripes or to a DDB did not help, because the compositor reads the frame back from the GPU. GPU capture (Desktop Duplication) would need the hardware device above. So the shortcut first shows a translucent black window excluded from capture (`WDA_EXCLUDEFROMCAPTURE`, Windows 10 2004+): the screen reacts in under 10 ms, and the frozen overlay with the same dimming covers it when ready. A test confirmed that captures do not include it and take the same time.
+- **Caches released after a capture.** Direct2D and WARP kept 132 MB after a capture; `ID2D1Device::ClearResources` and `IDXGIDevice3::Trim` bring it to 28 MB, which WARP keeps process-wide (it is not freed even when the device is destroyed) and which does not grow. The working set is trimmed after startup and after each capture, at about 5 ms on the next capture.
+- **Clipboard formats.** Both `CF_DIB` (32-bit, opaque) and `PNG` use delayed rendering; Windows synthesizes `CF_DIBV5` and `CF_BITMAP` from `CF_DIB`.
+- **Highlighter.** Each stroke is drawn opaque into a layer composited at 45% opacity, so the stroke never darkens where it crosses itself.
+- **Extra keyboard paths.** `1`-`8` for colors, `[` and `]` for the stroke width, Shift for 45 degree lines and squares, the arrow keys to move the selection. With nothing selected, copy and save take the monitor under the mouse.
+- **Tray menu.** Adds Settings..., which opens `config.toml` (written from a commented template on first use). Settings apply when the file is saved: the message loop waits on a change notification for the settings folder.
+- **Installer.** The stock WixUI exit dialog has one checkbox, used for "Open Simple Screen Grabber". Start with Windows is a separate feature, on by default (`START_WITH_WINDOWS=0` turns it off), kept off on upgrade when the user turned it off in the tray, and never re-enabled by the advertised shortcut's repair check. Uninstall removes it even when it was turned on later from the tray.
+- **Second launch.** Starts a capture in the running instance.
+
+### Later
+
+- Capture into a GDI-compatible texture to skip one copy (about 3 ms and 20 MB less during a capture).
+- Smoother freehand strokes from the high-resolution mouse positions (`GetMouseMovePointsEx`).
