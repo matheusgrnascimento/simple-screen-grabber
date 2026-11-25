@@ -78,8 +78,6 @@ const FADE_TIMER: usize = 1;
 const FADE_SECONDS: f32 = 0.167;
 /// Swap chain size while hidden: the buffers are freed, not the chain.
 const IDLE_BUFFER: u32 = 8;
-/// The default stroke width in DIPs (multiplied by the monitor scale).
-const DEFAULT_WIDTH: f32 = 3.0;
 
 /// What the overlay asks the app to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -300,6 +298,10 @@ pub struct Overlay {
     /// When the toolbars started fading in, and whether the timer runs.
     fade_start: Option<Instant>,
     fade_timer: bool,
+    /// The color (index in `COLORS`) and stroke width (DIPs) a capture
+    /// starts with, from the settings.
+    default_color: usize,
+    default_width: f32,
 }
 
 impl Overlay {
@@ -383,7 +385,15 @@ impl Overlay {
             session: None,
             fade_start: None,
             fade_timer: false,
+            default_color: 0,
+            default_width: 3.0,
         })
+    }
+
+    /// The color and stroke width the next captures start with.
+    pub fn set_defaults(&mut self, color: usize, width: f32) {
+        self.default_color = color.min(COLORS.len() - 1);
+        self.default_width = width;
     }
 
     /// Follows a new theme or new visual settings.
@@ -417,8 +427,10 @@ impl Overlay {
             mouse,
             hover: None,
             tool: None,
-            color: 0,
-            width: (DEFAULT_WIDTH * scale).round(),
+            color: self.default_color,
+            width: (self.default_width * scale)
+                .round()
+                .clamp(MIN_WIDTH, MAX_WIDTH),
             history: History::default(),
             drawing: None,
             flyout_open: false,

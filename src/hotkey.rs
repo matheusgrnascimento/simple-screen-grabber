@@ -36,6 +36,46 @@ impl Hotkey {
         key: b'S' as u32,
     };
 
+    /// Parses a combination such as `Ctrl+Alt+S` or `Shift+PrintScreen`.
+    /// Letters, digits and Space need at least one modifier, so typing is
+    /// never captured.
+    pub fn parse(text: &str) -> Result<Hotkey, String> {
+        let mut hotkey = Hotkey {
+            ctrl: false,
+            alt: false,
+            shift: false,
+            win: false,
+            key: 0,
+        };
+        let parts: Vec<&str> = text.split('+').map(str::trim).collect();
+        let Some((key_name, modifiers)) = parts.split_last() else {
+            return Err("the shortcut is empty".into());
+        };
+        for modifier in modifiers {
+            let flag = match modifier.to_ascii_lowercase().as_str() {
+                "ctrl" | "control" => &mut hotkey.ctrl,
+                "alt" => &mut hotkey.alt,
+                "shift" => &mut hotkey.shift,
+                "win" | "windows" => &mut hotkey.win,
+                "" => return Err(format!("\"{text}\" has an empty part")),
+                other => return Err(format!("\"{other}\" is not a modifier key")),
+            };
+            if *flag {
+                return Err(format!("\"{modifier}\" appears twice"));
+            }
+            *flag = true;
+        }
+        hotkey.key =
+            key_code(key_name).ok_or_else(|| format!("\"{key_name}\" is not a supported key"))?;
+        let typing_key = matches!(hotkey.key, 0x20 | 0x30..=0x39 | 0x41..=0x5A);
+        if typing_key && !(hotkey.ctrl || hotkey.alt || hotkey.win) {
+            return Err(format!(
+                "\"{text}\" needs Ctrl, Alt or Win, so it does not block typing"
+            ));
+        }
+        Ok(hotkey)
+    }
+
     fn modifiers(&self) -> HOT_KEY_MODIFIERS {
         let mut flags = MOD_NOREPEAT;
         for (on, flag) in [
@@ -81,6 +121,32 @@ const NAMED_KEYS: [(&str, u32); 10] = [
     ("ScrollLock", 0x91),
 ];
 
+fn key_code(name: &str) -> Option<u32> {
+    let upper = name.to_ascii_uppercase();
+    if let [c] = upper.as_bytes() {
+        if c.is_ascii_uppercase() || c.is_ascii_digit() {
+            return Some(u32::from(*c));
+        }
+    }
+    if let Some(n) = upper.strip_prefix('F').and_then(|n| n.parse::<u32>().ok()) {
+        if (1..=24).contains(&n) {
+            return Some(0x70 + n - 1);
+        }
+    }
+    let alias = match upper.as_str() {
+        "PRTSC" | "PRTSCN" | "PRINT" => "PrintScreen",
+        "DEL" => "Delete",
+        "INS" => "Insert",
+        "PGUP" => "PageUp",
+        "PGDN" => "PageDown",
+        _ => name,
+    };
+    NAMED_KEYS
+        .iter()
+        .find(|(n, _)| n.eq_ignore_ascii_case(alias))
+        .map(|&(_, code)| code)
+}
+
 fn key_name(code: u32) -> String {
     match code {
         0x30..=0x39 | 0x41..=0x5A => char::from(code as u8).to_string(),
@@ -117,15 +183,51 @@ mod tests {
     use super::*;
 
     #[test]
+    fn parses_the_default() {
+        assert_eq!(Hotkey::parse("Ctrl+Alt+S"), Ok(Hotkey::DEFAULT));
+        assert_eq!(Hotkey::parse(" ctrl + ALT + s "), Ok(Hotkey::DEFAULT));
+    }
+
+    #[test]
     fn displays_in_canonical_order() {
-        let hotkey = Hotkey {
-            ctrl: true,
-            alt: false,
-            shift: true,
-            win: true,
-            key: 0x74,
-        };
+        let hotkey = Hotkey::parse("Shift+Win+Ctrl+F5").unwrap();
         assert_eq!(hotkey.to_string(), "Ctrl+Shift+Win+F5");
         assert_eq!(Hotkey::DEFAULT.to_string(), "Ctrl+Alt+S");
+    }
+
+    #[test]
+    fn named_keys_round_trip() {
+        for text in [
+            "PrintScreen",
+            "Shift+PrintScreen",
+            "Ctrl+Alt+Delete",
+            "Win+F24",
+        ] {
+            assert_eq!(Hotkey::parse(text).unwrap().to_string(), text);
+        }
+        assert_eq!(Hotkey::parse("PrtSc").unwrap().key, 0x2C);
+    }
+
+    #[test]
+    fn typing_keys_need_a_modifier() {
+        assert!(Hotkey::parse("S").is_err());
+        assert!(Hotkey::parse("Shift+S").is_err());
+        assert!(Hotkey::parse("Space").is_err());
+        assert!(Hotkey::parse("Alt+1").is_ok());
+        assert!(Hotkey::parse("F9").is_ok());
+    }
+
+    #[test]
+    fn rejects_invalid_text() {
+        for text in [
+            "",
+            "Ctrl+",
+            "Ctrl+Ctrl+S",
+            "Hyper+S",
+            "Ctrl+F25",
+            "Ctrl+Enter",
+        ] {
+            assert!(Hotkey::parse(text).is_err(), "{text}");
+        }
     }
 }

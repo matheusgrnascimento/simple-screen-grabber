@@ -94,6 +94,18 @@ impl Tray {
         }
     }
 
+    /// Changes the tooltip (for a new shortcut).
+    pub fn set_tooltip(&mut self, tooltip: &str) {
+        self.tooltip = tooltip.to_owned();
+        let mut data = self.data();
+        data.uFlags = NIF_TIP | NIF_SHOWTIP;
+        win::copy_to_field(&mut data.szTip, tooltip);
+        // SAFETY: `data` is a fully initialized NOTIFYICONDATAW.
+        unsafe {
+            let _ = Shell_NotifyIconW(NIM_MODIFY, &data);
+        }
+    }
+
     /// Shows a notification. Windows shows it as a toast and sends
     /// `NIN_BALLOONUSERCLICK` when it is clicked.
     pub fn notify(&self, title: &str, text: &str) {

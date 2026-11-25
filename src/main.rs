@@ -6,6 +6,7 @@
 mod annotate;
 mod app;
 mod capture;
+mod config;
 mod export;
 mod fluent;
 mod geometry;
@@ -14,6 +15,7 @@ mod hotkey;
 mod log;
 mod overlay;
 mod paths;
+mod startup;
 mod tray;
 mod win;
 

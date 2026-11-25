@@ -1,5 +1,5 @@
 //! The app: single instance, the hidden host window, the tray icon, the
-//! global shortcut and the message loop.
+//! global shortcut, the settings and the message loop.
 //!
 //! All state lives in one [`App`] on the UI thread. Window procedures reach
 //! it through [`with_app`], which skips messages that arrive while the
@@ -12,32 +12,40 @@ use std::path::{Path, PathBuf};
 
 use windows::core::{w, Result, PCWSTR};
 use windows::Win32::Foundation::{
-    GetLastError, ERROR_ALREADY_EXISTS, HWND, LPARAM, LRESULT, POINT, WPARAM,
+    GetLastError, ERROR_ALREADY_EXISTS, HANDLE, HWND, LPARAM, LRESULT, POINT, WAIT_OBJECT_0, WPARAM,
+};
+use windows::Win32::Storage::FileSystem::{
+    FindCloseChangeNotification, FindFirstChangeNotificationW, FindNextChangeNotification,
+    FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE,
 };
 use windows::Win32::System::Com::{
     CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED, COINIT_MULTITHREADED,
 };
 use windows::Win32::System::Threading::CreateMutexW;
+use windows::Win32::System::Threading::INFINITE;
 use windows::Win32::UI::Shell::{
     ILCreateFromPathW, ILFree, SHOpenFolderAndSelectItems, ShellExecuteW, NINF_KEY,
     NIN_BALLOONUSERCLICK, NIN_SELECT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-    FindWindowW, GetMessageW, GetWindowThreadProcessId, PostMessageW, PostQuitMessage,
-    RegisterClassExW, RegisterWindowMessageW, TranslateMessage, MSG, SW_SHOWNORMAL, WM_APP,
-    WM_CONTEXTMENU, WM_DESTROYCLIPBOARD, WM_DISPLAYCHANGE, WM_ENDSESSION, WM_HOTKEY,
+    FindWindowW, GetWindowThreadProcessId, KillTimer, MsgWaitForMultipleObjectsEx, PeekMessageW,
+    PostMessageW, PostQuitMessage, RegisterClassExW, RegisterWindowMessageW, SetTimer,
+    TranslateMessage, MSG, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT, SW_SHOWNORMAL, WM_APP,
+    WM_CONTEXTMENU, WM_DESTROYCLIPBOARD, WM_DISPLAYCHANGE, WM_ENDSESSION, WM_HOTKEY, WM_QUIT,
     WM_RENDERALLFORMATS, WM_RENDERFORMAT, WM_SETTINGCHANGE, WM_SYSCOLORCHANGE, WM_THEMECHANGED,
-    WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_POPUP,
+    WM_TIMER, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
 use crate::capture::Timestamp;
+use crate::config::{Config, Location};
 use crate::export::{self, clipboard::Clipboard, Image};
 use crate::fluent::{menus, Theme};
 use crate::hotkey::{self, Hotkey};
 use crate::log;
 use crate::overlay::{self, Overlay};
 use crate::paths;
+use crate::startup;
 use crate::tray::{self, MenuItem, Tray};
 use crate::win::{self, Handle};
 
@@ -57,7 +65,14 @@ const NIN_KEYSELECT: u32 = NIN_SELECT | NINF_KEY;
 
 const CMD_CAPTURE: u32 = 1;
 const CMD_OPEN_FOLDER: u32 = 2;
+const CMD_SETTINGS: u32 = 3;
+const CMD_AUTOSTART: u32 = 4;
 const CMD_EXIT: u32 = 99;
+
+/// Reloads the settings shortly after their folder changes, once the
+/// editor has finished saving.
+const CONFIG_TIMER: usize = 1;
+const CONFIG_DELAY_MS: u32 = 250;
 
 /// Command line options.
 #[derive(Default)]
@@ -85,7 +100,14 @@ struct App {
     overlay: Overlay,
     theme: Theme,
     clipboard: Clipboard,
-    hotkey: Hotkey,
+    location: Location,
+    config: Config,
+    /// The settings file's modification time and size when last read.
+    config_stamp: Option<(std::time::SystemTime, u64)>,
+    /// Problems in the settings file, as last reported.
+    config_problems: Vec<String>,
+    /// Watches the settings folder, when it exists.
+    watch: Option<FolderWatch>,
     registration: Option<hotkey::Registration>,
     taskbar_created: u32,
     /// What a click on the last notification does.
@@ -97,6 +119,34 @@ enum NotificationAction {
     None,
     /// Show a saved screenshot in File Explorer.
     ShowFile(PathBuf),
+}
+
+/// A change notification on a folder, closed on drop.
+struct FolderWatch(HANDLE);
+
+impl FolderWatch {
+    /// Signals when a file in `folder` is written, created or renamed.
+    fn start(folder: &Path) -> Option<FolderWatch> {
+        let path = win::wide(&folder.to_string_lossy());
+        // SAFETY: the path is null-terminated and outlives the call.
+        let handle = unsafe {
+            FindFirstChangeNotificationW(
+                win::pcwstr(&path),
+                false,
+                FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_FILE_NAME,
+            )
+        };
+        handle.ok().map(FolderWatch)
+    }
+}
+
+impl Drop for FolderWatch {
+    fn drop(&mut self) {
+        // SAFETY: the handle came from FindFirstChangeNotificationW.
+        unsafe {
+            let _ = FindCloseChangeNotification(self.0);
+        }
+    }
 }
 
 /// A window handle that the save thread may post to.
@@ -117,27 +167,36 @@ pub fn run(options: Options) -> Result<()> {
     let host = create_host_window()?;
     // SAFETY: registers (or looks up) a system-wide message name.
     let taskbar_created = unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) };
-    let hotkey = Hotkey::DEFAULT;
-    let tray = Tray::new(host, WM_APP_TRAY, &tooltip(hotkey))?;
+    let location = Location::find();
+    let config_stamp = location.stamp();
+    let (config, config_problems) = location.load();
+    let tray = Tray::new(host, WM_APP_TRAY, &tooltip(config.hotkey))?;
     let theme = Theme::load();
     menus::set_dark(theme.palette.dark);
-    let overlay = Overlay::new(Some(overlay_proc), theme)?;
+    let mut overlay = Overlay::new(Some(overlay_proc), theme)?;
+    overlay.set_defaults(config.color, config.stroke_width);
+    let watch = FolderWatch::start(&location.folder);
     let mut app = App {
         host,
         tray,
         overlay,
         theme,
         clipboard: Clipboard::new(),
-        hotkey,
+        location,
+        config,
+        config_stamp,
+        config_problems: Vec::new(),
+        watch,
         registration: None,
         taskbar_created,
         notification: NotificationAction::None,
     };
     app.register_hotkey();
+    app.report_problems(config_problems);
     if !options.autostart {
         app.tray.notify(
             &format!("{APP_NAME} is running"),
-            &format!("Press {hotkey} to take a screenshot."),
+            &format!("Press {} to take a screenshot.", app.config.hotkey),
         );
     }
     APP.with(|cell| *cell.borrow_mut() = Some(app));
@@ -211,20 +270,33 @@ fn create_host_window() -> Result<HWND> {
     }
 }
 
+/// The message loop. It sleeps in the kernel until a message arrives or
+/// the settings folder changes: no polling, no timers.
 fn message_loop() -> Result<()> {
     let mut msg = MSG::default();
     loop {
-        // SAFETY: standard message loop on the UI thread.
-        let status = unsafe { GetMessageW(&mut msg, None, 0, 0) }.0;
-        match status {
-            0 => return Ok(()),
-            -1 => return Err(windows::core::Error::from_thread()),
-            _ => {
-                // SAFETY: `msg` was filled by GetMessageW.
-                unsafe {
-                    let _ = TranslateMessage(&msg);
-                    DispatchMessageW(&msg);
+        let watch = with_app(|app| app.watch.as_ref().map(|w| w.0)).flatten();
+        let handles: &[HANDLE] = match &watch {
+            Some(handle) => std::slice::from_ref(handle),
+            None => &[],
+        };
+        // SAFETY: waits on a handle owned by the app, which outlives the
+        // wait (it is only replaced from this thread).
+        let wait = unsafe {
+            MsgWaitForMultipleObjectsEx(Some(handles), INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE)
+        };
+        if watch.is_some() && wait == WAIT_OBJECT_0 {
+            with_app(|app| app.config_folder_changed());
+            continue;
+        }
+        // SAFETY: standard message pump on the UI thread.
+        unsafe {
+            while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                if msg.message == WM_QUIT {
+                    return Ok(());
                 }
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
             }
         }
     }
@@ -296,6 +368,13 @@ impl App {
             WM_DESTROYCLIPBOARD => self.clipboard.release(),
             WM_ENDSESSION if wparam.0 != 0 => self.clipboard.render_all(self.host),
             WM_DISPLAYCHANGE => self.tray.refresh_icon(),
+            WM_TIMER if wparam.0 == CONFIG_TIMER => {
+                // SAFETY: stops this thread's window timer.
+                unsafe {
+                    let _ = KillTimer(Some(self.host), CONFIG_TIMER);
+                }
+                self.reload_config();
+            }
             // Theme, accent, high contrast, transparency or animation changes.
             WM_SETTINGCHANGE | WM_SYSCOLORCHANGE | WM_THEMECHANGED => {
                 self.reload_theme();
@@ -316,7 +395,7 @@ impl App {
         vec![
             MenuItem::Command {
                 id: CMD_CAPTURE,
-                label: format!("Capture\t{}", self.hotkey),
+                label: format!("Capture\t{}", self.config.hotkey),
                 checked: false,
                 enabled: true,
                 default: true,
@@ -326,6 +405,25 @@ impl App {
                 label: "Open screenshots folder".into(),
                 checked: false,
                 enabled: true,
+                default: false,
+            },
+            MenuItem::Command {
+                id: CMD_SETTINGS,
+                label: "Settings\u{2026}".into(),
+                checked: false,
+                enabled: true,
+                default: false,
+            },
+            MenuItem::Separator,
+            MenuItem::Command {
+                id: CMD_AUTOSTART,
+                label: if self.location.portable {
+                    "Start with Windows (not in portable mode)".into()
+                } else {
+                    "Start with Windows".into()
+                },
+                checked: !self.location.portable && startup::is_enabled(),
+                enabled: !self.location.portable,
                 default: false,
             },
             MenuItem::Separator,
@@ -349,6 +447,14 @@ impl App {
                 }
                 None => self.tray.notify("Couldn't find the Screenshots folder", ""),
             },
+            CMD_SETTINGS => self.open_settings(),
+            CMD_AUTOSTART => {
+                if let Err(err) = startup::set_enabled(!startup::is_enabled()) {
+                    log!("start with Windows not changed: {err}");
+                    self.tray
+                        .notify("Couldn't change Start with Windows", &err.message());
+                }
+            }
             // SAFETY: ends the message loop of this thread.
             CMD_EXIT => unsafe { PostQuitMessage(0) },
             _ => {}
@@ -357,12 +463,13 @@ impl App {
 
     fn register_hotkey(&mut self) {
         self.registration = None;
-        match hotkey::register(self.host, self.hotkey) {
+        let hotkey = self.config.hotkey;
+        match hotkey::register(self.host, hotkey) {
             Ok(registration) => self.registration = Some(registration),
             Err(err) => {
-                log!("shortcut {} not registered: {err}", self.hotkey);
+                log!("shortcut {hotkey} not registered: {err}");
                 self.tray.notify(
-                    &format!("{} is in use", self.hotkey),
+                    &format!("{hotkey} is in use"),
                     "Another app uses this shortcut. Use the tray icon to capture, or choose another shortcut in the settings.",
                 );
             }
@@ -388,7 +495,79 @@ impl App {
 
     /// The folder for saved screenshots.
     fn save_folder(&self) -> Option<PathBuf> {
-        paths::screenshots_folder()
+        self.config
+            .save_folder
+            .clone()
+            .or_else(paths::screenshots_folder)
+    }
+
+    /// Opens the settings file, writing it from the template first if
+    /// needed, in the app associated with .toml files or in Notepad.
+    fn open_settings(&mut self) {
+        let file = match self.location.ensure_file() {
+            Ok(file) => file,
+            Err(err) => {
+                log!("settings file not created: {err}");
+                self.tray
+                    .notify("Couldn't create the settings file", &err.to_string());
+                return;
+            }
+        };
+        if self.watch.is_none() {
+            self.watch = FolderWatch::start(&self.location.folder);
+        }
+        self.config_stamp = self.location.stamp();
+        open_file(&file);
+    }
+
+    /// The settings folder changed: reload shortly, once the editor has
+    /// finished writing.
+    fn config_folder_changed(&mut self) {
+        if let Some(watch) = &self.watch {
+            // SAFETY: re-arms the notification owned by `watch`.
+            if unsafe { FindNextChangeNotification(watch.0) }.is_err() {
+                self.watch = None;
+            }
+        }
+        // SAFETY: (re)starts a one-shot timer for this thread's window.
+        unsafe { SetTimer(Some(self.host), CONFIG_TIMER, CONFIG_DELAY_MS, None) };
+    }
+
+    /// Applies the settings file if it changed.
+    fn reload_config(&mut self) {
+        let stamp = self.location.stamp();
+        if stamp == self.config_stamp {
+            return;
+        }
+        self.config_stamp = stamp;
+        let (config, problems) = self.location.load();
+        let hotkey_changed = config.hotkey != self.config.hotkey;
+        self.config = config;
+        self.overlay
+            .set_defaults(self.config.color, self.config.stroke_width);
+        if hotkey_changed {
+            self.tray.set_tooltip(&tooltip(self.config.hotkey));
+            self.register_hotkey();
+        }
+        self.report_problems(problems);
+    }
+
+    /// Notifies about problems in the settings file, once per change.
+    fn report_problems(&mut self, problems: Vec<String>) {
+        if problems == self.config_problems {
+            return;
+        }
+        if let Some(first) = problems.first() {
+            let more = match problems.len() {
+                1 => String::new(),
+                n => format!(" (and {} more)", n - 1),
+            };
+            self.tray.notify(
+                "Some settings were not applied",
+                &format!("config.toml, {first}{more}"),
+            );
+        }
+        self.config_problems = problems;
     }
 
     /// Copies the selection and closes the overlay.
@@ -503,6 +682,34 @@ fn open_folder(folder: &Path) {
             PCWSTR::null(),
             SW_SHOWNORMAL,
         );
+    }
+}
+
+/// Opens a file in its associated app, or in Notepad when it has none.
+fn open_file(file: &Path) {
+    let path = win::wide(&file.to_string_lossy());
+    // SAFETY: the strings are null-terminated and outlive the calls.
+    unsafe {
+        let result = ShellExecuteW(
+            None,
+            w!("open"),
+            win::pcwstr(&path),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        );
+        // Values up to 32 are errors, such as no app for the file type.
+        if result.0 as usize <= 32 {
+            let quoted = win::wide(&format!("\"{}\"", file.display()));
+            ShellExecuteW(
+                None,
+                w!("open"),
+                w!("notepad.exe"),
+                win::pcwstr(&quoted),
+                PCWSTR::null(),
+                SW_SHOWNORMAL,
+            );
+        }
     }
 }
 
