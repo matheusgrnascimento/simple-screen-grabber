@@ -6,9 +6,9 @@
 //! The image is kept only while this app owns the clipboard, and released
 //! when another app takes it (`WM_DESTROYCLIPBOARD`).
 
-use windows::core::{w, Result};
+use windows::core::{w, Result, HRESULT};
 use windows::Win32::Foundation::GlobalFree;
-use windows::Win32::Foundation::{HANDLE, HWND};
+use windows::Win32::Foundation::{SetLastError, HANDLE, HWND, WIN32_ERROR};
 use windows::Win32::Graphics::Gdi::{BITMAPINFOHEADER, BI_RGB};
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, GetClipboardOwner, OpenClipboard, RegisterClipboardFormatW,
@@ -45,9 +45,9 @@ impl Clipboard {
             OpenClipboard(Some(owner))?;
             let result = (|| -> Result<()> {
                 EmptyClipboard()?;
-                SetClipboardData(u32::from(CF_DIB.0), None)?;
+                announce(u32::from(CF_DIB.0))?;
                 if self.png_format != 0 {
-                    SetClipboardData(self.png_format, None)?;
+                    announce(self.png_format)?;
                 }
                 Ok(())
             })();
@@ -134,6 +134,23 @@ fn dib(image: &Image) -> Vec<u8> {
         data.extend_from_slice(row);
     }
     data
+}
+
+/// Announces `format` on the open clipboard for delayed rendering.
+///
+/// `SetClipboardData` with no data returns NULL even on success, which the
+/// `windows` crate turns into an error; only a set last-error code is a real
+/// failure.
+fn announce(format: u32) -> Result<()> {
+    // SAFETY: called with the clipboard open by this thread; the last error
+    // is cleared first so that a stale code is not taken for a failure.
+    unsafe {
+        SetLastError(WIN32_ERROR(0));
+        match SetClipboardData(format, None) {
+            Err(err) if err.code() != HRESULT(0) => Err(err),
+            _ => Ok(()),
+        }
+    }
 }
 
 /// Hands `data` to the open clipboard in global memory, which the system
