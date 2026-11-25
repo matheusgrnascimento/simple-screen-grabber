@@ -76,6 +76,38 @@ impl Hotkey {
         Ok(hotkey)
     }
 
+    /// The combination of a key pressed with modifiers, as recorded by the
+    /// settings window. `None` for a modifier alone (the user is still
+    /// pressing the combination); an error for a key that cannot be a
+    /// shortcut.
+    pub fn from_keys(
+        key: u32,
+        ctrl: bool,
+        alt: bool,
+        shift: bool,
+        win: bool,
+    ) -> Option<Result<Hotkey, String>> {
+        // Shift, Ctrl, Alt (and their left/right codes), and the Win keys.
+        if matches!(key, 0x10..=0x12 | 0xA0..=0xA5 | 0x5B | 0x5C) {
+            return None;
+        }
+        let hotkey = Hotkey {
+            ctrl,
+            alt,
+            shift,
+            win,
+            key,
+        };
+        // The text form validates the key and the typing rule.
+        Some(Hotkey::parse(&hotkey.to_string()).map_err(|_| {
+            if key_code(&key_name(key)).is_some() {
+                "Add Ctrl, Alt or Win, so typing still works".to_string()
+            } else {
+                "That key can't be used in a shortcut".to_string()
+            }
+        }))
+    }
+
     fn modifiers(&self) -> HOT_KEY_MODIFIERS {
         let mut flags = MOD_NOREPEAT;
         for (on, flag) in [
@@ -229,5 +261,32 @@ mod tests {
         ] {
             assert!(Hotkey::parse(text).is_err(), "{text}");
         }
+    }
+
+    #[test]
+    fn records_pressed_keys() {
+        assert_eq!(
+            Hotkey::from_keys(u32::from(b'S'), true, true, false, false),
+            Some(Ok(Hotkey::DEFAULT))
+        );
+        assert_eq!(
+            Hotkey::from_keys(0x2C, false, false, true, false)
+                .unwrap()
+                .unwrap()
+                .to_string(),
+            "Shift+PrintScreen"
+        );
+        // A modifier alone: still pressing.
+        assert_eq!(Hotkey::from_keys(0x11, true, false, false, false), None);
+        assert_eq!(Hotkey::from_keys(0xA4, false, true, false, false), None);
+        // A letter alone would block typing; Enter is not supported.
+        assert!(
+            Hotkey::from_keys(u32::from(b'A'), false, false, true, false)
+                .unwrap()
+                .is_err()
+        );
+        assert!(Hotkey::from_keys(0x0D, true, false, false, false)
+            .unwrap()
+            .is_err());
     }
 }

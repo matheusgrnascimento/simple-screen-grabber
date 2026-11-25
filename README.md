@@ -13,7 +13,7 @@ Simple native Windows app for screenshots: press a shortcut, select an area, ann
 - with nothing selected, saving or copying takes the monitor under the mouse;
 - Windows 11 look: toolbars, color flyout, size label and tooltips in Acrylic made from the frozen screen, elevation shadows, Segoe UI Variable and Segoe Fluent Icons (Segoe MDL2 Assets on Windows 10), the accent color, and the light/dark theme, high contrast, transparency and animation settings of Windows, followed live;
 - tray icon with Capture, Open screenshots folder, Settings, Start with Windows and Exit; the tray menu follows the dark theme;
-- settings in a `config.toml` file, applied as soon as it is saved;
+- a settings window (shortcut, screenshots folder, default color and stroke width, Start with Windows), saved to a `config.toml` file that can also be edited by hand;
 - a portable mode, an MSI installer, and a `--bench` mode that measures the app on your machine.
 
 ## Shortcuts
@@ -38,7 +38,9 @@ Every toolbar button has a tooltip with its shortcut. Launching the app again wh
 
 ## Settings
 
-**Settings...** in the tray menu opens `config.toml`, writing it from a commented template the first time. It lives in `%APPDATA%\simple-screen-grabber`, or next to the executable in portable mode. Changes apply when the file is saved; invalid values keep the defaults and a notification names the line.
+**Settings...** in the tray menu (or `simple-screen-grabber.exe --settings`) opens the settings window. To change the shortcut, click it and press the new keys (Esc cancels); a shortcut owned by another app is refused. Every change applies at once and is written to `config.toml`, rewriting only that setting's line, so comments stay.
+
+**Edit the settings file**, at the bottom of the window, opens `config.toml`, writing it from a commented template the first time. It lives in `%APPDATA%\simple-screen-grabber`, or next to the executable in portable mode. Changes made by hand apply when the file is saved; invalid values keep the defaults and a notification names the line.
 
 | Setting | Default | |
 |---|---|---|

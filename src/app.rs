@@ -38,13 +38,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::capture::Timestamp;
-use crate::config::{Config, Location};
+use crate::config::{Change, Config, Location};
 use crate::export::{self, clipboard::Clipboard, Image};
 use crate::fluent::{menus, Theme};
 use crate::hotkey::{self, Hotkey};
 use crate::log;
 use crate::overlay::{self, Overlay};
 use crate::paths;
+use crate::settings::{self, Action, Settings, Values};
 use crate::startup;
 use crate::tray::{self, MenuItem, Tray};
 use crate::win::{self, Handle};
@@ -55,6 +56,8 @@ const WM_APP_TRAY: u32 = WM_APP + 1;
 const WM_APP_CAPTURE: u32 = WM_APP + 2;
 /// Sent by the save thread; `lparam` is a `Box<Result<PathBuf>>`.
 const WM_APP_SAVED: u32 = WM_APP + 3;
+/// Sent by a launch with `--settings`: open the settings window.
+const WM_APP_SETTINGS: u32 = WM_APP + 4;
 
 const HOST_CLASS: PCWSTR = w!("SimpleScreenGrabber.Host");
 const INSTANCE_MUTEX: PCWSTR = w!("Local\\SimpleScreenGrabber.Instance");
@@ -83,6 +86,8 @@ const CONFIG_DELAY_MS: u32 = 250;
 pub struct Options {
     /// Started by Windows at sign-in: no "running" notification.
     pub autostart: bool,
+    /// `--settings`: open the settings window.
+    pub settings: bool,
 }
 
 thread_local! {
@@ -116,6 +121,8 @@ struct App {
     taskbar_created: u32,
     /// What a click on the last notification does.
     notification: NotificationAction,
+    /// The settings window, while open.
+    settings: Option<Settings>,
 }
 
 /// What a click on a notification does.
@@ -162,7 +169,11 @@ unsafe impl Send for PostTarget {}
 /// Runs the app until the user exits it.
 pub fn run(options: Options) -> Result<()> {
     let Some(_instance) = acquire_instance()? else {
-        signal_running_instance();
+        signal_running_instance(if options.settings {
+            WM_APP_SETTINGS
+        } else {
+            WM_APP_CAPTURE
+        });
         return Ok(());
     };
     // SAFETY: initializes COM for the UI thread, once, before any COM call.
@@ -194,10 +205,13 @@ pub fn run(options: Options) -> Result<()> {
         registration: None,
         taskbar_created,
         notification: NotificationAction::None,
+        settings: None,
     };
     app.register_hotkey();
     app.report_problems(config_problems);
-    if !options.autostart {
+    if options.settings {
+        app.open_settings();
+    } else if !options.autostart {
         app.tray.notify(
             &format!("{APP_NAME} is running"),
             &format!("Press {} to take a screenshot.", app.config.hotkey),
@@ -231,8 +245,8 @@ fn acquire_instance() -> Result<Option<Handle>> {
     Ok(Some(mutex))
 }
 
-/// Asks the running instance to start a capture.
-fn signal_running_instance() {
+/// Asks the running instance to start a capture or open the settings.
+fn signal_running_instance(message: u32) {
     // SAFETY: finds and posts to the other instance's host window; lets it
     // take the foreground, which this newly started process may grant.
     unsafe {
@@ -242,7 +256,7 @@ fn signal_running_instance() {
         let mut pid = 0;
         GetWindowThreadProcessId(hwnd, Some(&mut pid));
         let _ = AllowSetForegroundWindow(pid);
-        let _ = PostMessageW(Some(hwnd), WM_APP_CAPTURE, WPARAM(0), LPARAM(0));
+        let _ = PostMessageW(Some(hwnd), message, WPARAM(0), LPARAM(0));
     }
 }
 
@@ -334,6 +348,23 @@ extern "system" fn host_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARA
     }
 }
 
+extern "system" fn settings_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    let (result, browse) =
+        with_app(|app| app.settings_message(hwnd, msg, wparam, lparam)).unwrap_or((None, false));
+    if browse {
+        // The folder dialog runs a modal loop: show it with nothing borrowed.
+        let start = with_app(|app| app.save_folder()).flatten();
+        if let Some(folder) = settings::pick_folder(hwnd, start.as_deref()) {
+            with_app(|app| app.change_setting(Change::SaveFolder(Some(folder))));
+        }
+    }
+    match result {
+        Some(result) => result,
+        // SAFETY: default handling for this thread's window.
+        None => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    }
+}
+
 extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match with_app(|app| app.overlay_message(msg, wparam, lparam)) {
         Some(Some(result)) => result,
@@ -358,6 +389,7 @@ impl App {
         match msg {
             WM_HOTKEY if wparam.0 == hotkey::CAPTURE_ID as usize => self.capture(),
             WM_APP_CAPTURE => self.capture(),
+            WM_APP_SETTINGS => self.open_settings(),
             WM_APP_TRAY => match win::low_word(lparam.0 as usize) {
                 NIN_SELECT | NIN_KEYSELECT => self.capture(),
                 NIN_BALLOONUSERCLICK => self.notification_clicked(),
@@ -470,6 +502,7 @@ impl App {
                     self.tray
                         .notify("Couldn't change Start with Windows", &err.message());
                 }
+                self.refresh_settings();
             }
             // SAFETY: ends the message loop of this thread.
             CMD_EXIT => unsafe { PostQuitMessage(0) },
@@ -506,6 +539,9 @@ impl App {
             self.theme = theme;
             menus::set_dark(theme.palette.dark);
             self.overlay.set_theme(theme);
+            if let Some(settings) = &mut self.settings {
+                settings.set_theme(&theme);
+            }
         }
     }
 
@@ -517,9 +553,131 @@ impl App {
             .or_else(paths::screenshots_folder)
     }
 
+    /// Opens the settings window, or brings it to the front.
+    fn open_settings(&mut self) {
+        if let Some(settings) = &self.settings {
+            settings.show();
+            return;
+        }
+        match Settings::open(Some(settings_proc), self.settings_values(), self.theme) {
+            Ok(settings) => self.settings = Some(settings),
+            Err(err) => {
+                log!("settings window not opened: {err}");
+                self.tray
+                    .notify("Couldn't open the settings", &err.message());
+            }
+        }
+    }
+
+    /// The values the settings window shows.
+    fn settings_values(&self) -> Values {
+        Values {
+            hotkey: self.config.hotkey,
+            folder: self.config.save_folder.clone(),
+            default_folder: paths::screenshots_folder(),
+            color: self.config.color,
+            width: self.config.stroke_width.round() as i64,
+            autostart: !self.location.portable && startup::is_enabled(),
+            portable: self.location.portable,
+        }
+    }
+
+    fn refresh_settings(&mut self) {
+        if self.settings.is_some() {
+            let values = self.settings_values();
+            if let Some(settings) = &mut self.settings {
+                settings.set_values(values);
+            }
+        }
+    }
+
+    /// Handles a message of the settings window. Also returns whether to
+    /// show the folder dialog, which must run with nothing borrowed.
+    fn settings_message(
+        &mut self,
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> (Option<LRESULT>, bool) {
+        let Some(settings) = self.settings.as_mut().filter(|s| s.hwnd() == hwnd) else {
+            return (None, false);
+        };
+        let reply = settings.message(msg, wparam, lparam);
+        let browse = match reply.action {
+            Some(Action::Browse) => true,
+            Some(action) => {
+                self.settings_action(action);
+                false
+            }
+            None => false,
+        };
+        (reply.result, browse)
+    }
+
+    fn settings_action(&mut self, action: Action) {
+        match action {
+            Action::Change(change) => self.change_setting(change),
+            // While the shortcut box listens, the shortcut must reach it.
+            Action::Recording(true) => self.registration = None,
+            Action::Recording(false) => self.register_hotkey(),
+            Action::ToggleAutostart => self.command(CMD_AUTOSTART),
+            Action::OpenFile => self.open_settings_file(),
+            Action::Close => {
+                self.settings = None;
+                if self.registration.is_none() {
+                    self.register_hotkey();
+                }
+                win::trim_working_set();
+            }
+            Action::Browse => {}
+        }
+    }
+
+    /// Applies a change made in the settings window and writes it to the
+    /// file. A new shortcut is registered first: when another app owns it,
+    /// nothing changes and the window says why.
+    fn change_setting(&mut self, change: Change) {
+        if let Change::Hotkey(hotkey) = change {
+            self.registration = None;
+            match hotkey::register(self.host, hotkey) {
+                Ok(registration) => self.registration = Some(registration),
+                Err(err) => {
+                    log!("shortcut {hotkey} not registered: {err}");
+                    self.register_hotkey();
+                    if let Some(settings) = &mut self.settings {
+                        settings.hotkey_failed(format!("{hotkey} is used by another app"));
+                    }
+                    return;
+                }
+            }
+        }
+        if let Err(err) = self.location.save(&change) {
+            log!("setting not saved: {err}");
+            self.tray
+                .notify("Couldn't save the settings", &err.to_string());
+            if matches!(change, Change::Hotkey(_)) {
+                self.register_hotkey();
+            }
+            self.refresh_settings();
+            return;
+        }
+        if self.watch.is_none() {
+            self.watch = FolderWatch::start(&self.location.folder);
+        }
+        // Read the file back, as after an edit by hand.
+        self.config_stamp = None;
+        self.reload_config();
+        if let Change::Hotkey(hotkey) = change {
+            if self.config.hotkey != hotkey {
+                self.register_hotkey();
+            }
+        }
+    }
+
     /// Opens the settings file, writing it from the template first if
     /// needed, in the app associated with .toml files or in Notepad.
-    fn open_settings(&mut self) {
+    fn open_settings_file(&mut self) {
         let file = match self.location.ensure_file() {
             Ok(file) => file,
             Err(err) => {
@@ -566,6 +724,7 @@ impl App {
             self.register_hotkey();
         }
         self.report_problems(problems);
+        self.refresh_settings();
     }
 
     /// Notifies about problems in the settings file, once per change.

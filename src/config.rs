@@ -4,9 +4,9 @@
 //!
 //! The file lives in `%APPDATA%\simple-screen-grabber`, or next to the
 //! executable in portable mode (a file named `portable` beside it). It is
-//! only written when the user opens the settings, from a commented
-//! template. Missing or invalid values fall back to the defaults, and each
-//! problem is reported.
+//! only written when the user changes a setting, from a commented template;
+//! a change rewrites only its own line. Missing or invalid values fall back
+//! to the defaults, and each problem is reported.
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -102,6 +102,16 @@ impl Location {
         }
     }
 
+    /// Writes one setting to the file, creating it from the template if
+    /// needed. Only that setting's line changes: comments and the other
+    /// lines stay as the user wrote them.
+    pub fn save(&self, change: &Change) -> std::io::Result<()> {
+        let file = self.ensure_file()?;
+        let text = std::fs::read_to_string(&file)?;
+        let (key, literal) = change.entry();
+        std::fs::write(&file, set_value(&text, key, &literal))
+    }
+
     /// The settings file, written from the template if it does not exist.
     pub fn ensure_file(&self) -> std::io::Result<PathBuf> {
         let file = self.file();
@@ -142,6 +152,84 @@ stroke_width = {width}
         max = MAX_STROKE,
         width = Config::default().stroke_width,
     )
+}
+
+/// A change to one setting, made in the settings window.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Change {
+    Hotkey(Hotkey),
+    /// `None` for the Windows Screenshots folder.
+    SaveFolder(Option<PathBuf>),
+    Color(usize),
+    StrokeWidth(i64),
+}
+
+impl Change {
+    /// The key and its value as written in the file.
+    fn entry(&self) -> (&'static str, String) {
+        match self {
+            Change::Hotkey(hotkey) => ("hotkey", format!("\"{hotkey}\"")),
+            Change::SaveFolder(None) => ("save_folder", "''".into()),
+            Change::SaveFolder(Some(path)) => ("save_folder", quote(&path.to_string_lossy())),
+            Change::Color(index) => {
+                let name = COLORS[(*index).min(COLORS.len() - 1)].1.to_lowercase();
+                ("color", format!("\"{name}\""))
+            }
+            Change::StrokeWidth(width) => (
+                "stroke_width",
+                (*width).clamp(MIN_STROKE, MAX_STROKE).to_string(),
+            ),
+        }
+    }
+}
+
+/// The stroke width limits, for the settings window.
+pub const STROKE_RANGE: std::ops::RangeInclusive<i64> = MIN_STROKE..=MAX_STROKE;
+
+/// Text as a TOML string: single quotes keep backslashes as they are;
+/// double quotes with escapes when the text has a single quote.
+fn quote(text: &str) -> String {
+    if !text.contains('\'') && !text.contains('\n') {
+        format!("'{text}'")
+    } else {
+        let escaped = text
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n");
+        format!("\"{escaped}\"")
+    }
+}
+
+/// `text` with the line of `key` set to `key = literal`, or the entry
+/// added at the end when the key is missing. Commented lines and the
+/// other settings are kept.
+fn set_value(text: &str, key: &str, literal: &str) -> String {
+    let entry = format!("{key} = {literal}");
+    let mut found = false;
+    let mut out: Vec<String> = text
+        .lines()
+        .map(|line| {
+            let is_key = line
+                .trim_start()
+                .strip_prefix(key)
+                .is_some_and(|rest| rest.trim_start().starts_with('='));
+            if is_key && !found {
+                found = true;
+                entry.clone()
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect();
+    if !found {
+        if out.last().is_some_and(|l| !l.trim().is_empty()) {
+            out.push(String::new());
+        }
+        out.push(entry);
+    }
+    let mut result = out.join("\n");
+    result.push('\n');
+    result
 }
 
 /// A value of the TOML subset.
@@ -374,6 +462,54 @@ mod tests {
         assert_eq!(problems.len(), 8, "{problems:?}");
         assert!(problems[0].starts_with("line 1: hotkey"));
         assert!(problems[3].contains("set twice"));
+    }
+
+    #[test]
+    fn changes_rewrite_only_their_line() {
+        let text = "# mine\nhotkey = \"Ctrl+Alt+S\"  # old\n# keep\ncolor = \"red\"\n";
+        let changed = set_value(text, "color", "\"blue\"");
+        assert_eq!(
+            changed,
+            "# mine\nhotkey = \"Ctrl+Alt+S\"  # old\n# keep\ncolor = \"blue\"\n"
+        );
+        let added = set_value("# only a comment", "stroke_width", "7");
+        assert_eq!(added, "# only a comment\n\nstroke_width = 7\n");
+        // A commented-out entry is not the setting.
+        let commented = set_value("# color = \"red\"\n", "color", "\"green\"");
+        assert!(commented.starts_with("# color = \"red\"\n"));
+        assert!(commented.ends_with("color = \"green\"\n"));
+    }
+
+    #[test]
+    fn every_change_reads_back() {
+        let changes = [
+            Change::Hotkey(Hotkey::parse("Ctrl+Shift+PrintScreen").unwrap()),
+            Change::SaveFolder(Some(PathBuf::from(r"D:\Shots"))),
+            Change::Color(5),
+            Change::StrokeWidth(9),
+        ];
+        let mut text = template();
+        for change in &changes {
+            let (key, literal) = change.entry();
+            text = set_value(&text, key, &literal);
+        }
+        let config = parse_ok(&text);
+        assert_eq!(
+            config.hotkey,
+            Hotkey::parse("Ctrl+Shift+PrintScreen").unwrap()
+        );
+        assert_eq!(config.save_folder, Some(PathBuf::from(r"D:\Shots")));
+        assert_eq!(config.color, 5);
+        assert_eq!(config.stroke_width, 9.0);
+        let (key, literal) = Change::SaveFolder(None).entry();
+        assert_eq!(parse_ok(&set_value(&text, key, &literal)).save_folder, None);
+    }
+
+    #[test]
+    fn folders_with_quotes_survive() {
+        let path = r"D:\Bob's \x";
+        let config = parse_ok(&format!("save_folder = {}", quote(path)));
+        assert_eq!(config.save_folder, Some(PathBuf::from(path)));
     }
 
     #[test]

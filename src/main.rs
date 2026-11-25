@@ -16,6 +16,7 @@ mod hotkey;
 mod log;
 mod overlay;
 mod paths;
+mod settings;
 mod startup;
 mod tray;
 mod win;
@@ -31,6 +32,7 @@ fn main() {
         match arg.as_str() {
             "--autostart" => options.autostart = true,
             "--bench" => bench = true,
+            "--settings" => options.settings = true,
             // Used by the installer, and by scripts.
             "--enable-autostart" => set_autostart = Some(true),
             "--disable-autostart" => set_autostart = Some(false),
