@@ -43,13 +43,14 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, GetCursorPos, GetSystemMetrics, LoadCursorW, RegisterClassExW, SetCursor,
-    SetForegroundWindow, SetWindowPos, ShowWindow, CS_DBLCLKS, HCURSOR, HTCLIENT, HWND_TOPMOST,
-    IDC_ARROW, IDC_CROSS, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE,
-    SM_CXDRAG, SM_CYDRAG, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, WA_INACTIVE, WHEEL_DELTA,
-    WM_ACTIVATE, WM_CAPTURECHANGED, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN,
-    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT,
-    WM_SETCURSOR, WNDCLASSEXW, WNDPROC, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    CreateWindowExW, GetCursorPos, GetSystemMetrics, KillTimer, LoadCursorW, PostMessageW,
+    RegisterClassExW, SetCursor, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow,
+    CS_DBLCLKS, HCURSOR, HTCLIENT, HWND_TOPMOST, IDC_ARROW, IDC_CROSS, IDC_SIZEALL, IDC_SIZENESW,
+    IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, SM_CXDRAG, SM_CYDRAG, SWP_NOACTIVATE, SWP_SHOWWINDOW,
+    SW_HIDE, WA_INACTIVE, WHEEL_DELTA, WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_DISPLAYCHANGE,
+    WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_SETCURSOR, WM_TIMER, WNDCLASSEXW, WNDPROC,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use self::selection::Handle;
@@ -58,7 +59,7 @@ use crate::annotate::draw::ShapePainter;
 use crate::annotate::{History, PointF, Shape, Tool, COLORS, MAX_WIDTH, MIN_WIDTH};
 use crate::capture::{self, Capture, Timestamp};
 use crate::export::{self, Image};
-use crate::fluent::Palette;
+use crate::fluent::Theme;
 use crate::geometry::{Point, Rect};
 use crate::gfx::Gfx;
 use crate::log;
@@ -69,6 +70,12 @@ const CLASS: PCWSTR = w!("SimpleScreenGrabber.Overlay");
 /// constants live in the Common Controls bindings, not needed otherwise.
 const WM_MOUSEHOVER: u32 = 0x02A1;
 const HOVER_DEFAULT: u32 = 0xFFFF_FFFF;
+/// Posted to itself once the overlay shows: prepare the Acrylic backdrop.
+const WM_APP_PREPARE: u32 = WM_APP + 10;
+/// Drives the toolbar fade-in, only while it runs.
+const FADE_TIMER: usize = 1;
+/// The fade-in duration (the Fluent "fast" duration).
+const FADE_SECONDS: f32 = 0.167;
 /// Swap chain size while hidden: the buffers are freed, not the chain.
 const IDLE_BUFFER: u32 = 8;
 /// The default stroke width in DIPs (multiplied by the monitor scale).
@@ -287,14 +294,17 @@ pub struct Overlay {
     target: Option<ID2D1Bitmap1>,
     painter: render::Painter,
     shapes: ShapePainter,
-    palette: Palette,
+    theme: Theme,
     cursors: Cursors,
     session: Option<Session>,
+    /// When the toolbars started fading in, and whether the timer runs.
+    fade_start: Option<Instant>,
+    fade_timer: bool,
 }
 
 impl Overlay {
     /// Creates the hidden overlay window and its graphics resources.
-    pub fn new(window_proc: WNDPROC, palette: Palette) -> Result<Overlay> {
+    pub fn new(window_proc: WNDPROC, theme: Theme) -> Result<Overlay> {
         let gfx = Gfx::new()?;
         let class = WNDCLASSEXW {
             cbSize: size_of::<WNDCLASSEXW>() as u32,
@@ -368,10 +378,18 @@ impl Overlay {
             target: None,
             painter,
             shapes,
-            palette,
+            theme,
             cursors: Cursors::load()?,
             session: None,
+            fade_start: None,
+            fade_timer: false,
         })
+    }
+
+    /// Follows a new theme or new visual settings.
+    pub fn set_theme(&mut self, theme: Theme) {
+        self.theme = theme;
+        self.invalidate();
     }
 
     /// Captures the screen and shows the overlay.
@@ -426,12 +444,14 @@ impl Overlay {
             self.close();
             return Err(err);
         }
-        // SAFETY: uncloaks and activates this thread's window.
+        // SAFETY: uncloaks and activates this thread's window; the posted
+        // message prepares the Acrylic backdrop once the overlay is shown.
         unsafe {
             set_dwm_bool(self.hwnd, DWMWA_CLOAK.0 as u32, false);
             let _ = SetForegroundWindow(self.hwnd);
             let _ = SetFocus(Some(self.hwnd));
             SetCursor(Some(self.cursors.cross));
+            let _ = PostMessageW(Some(self.hwnd), WM_APP_PREPARE, WPARAM(0), LPARAM(0));
         }
         log!(
             "capture {width}x{height}: screen {:.1} ms, overlay shown after {:.1} ms",
@@ -471,6 +491,8 @@ impl Overlay {
         if self.session.take().is_none() {
             return;
         }
+        self.painter.release();
+        self.stop_fade();
         // SAFETY: hides this thread's window; releases the mouse if held.
         unsafe {
             set_dwm_bool(self.hwnd, DWMWA_CLOAK.0 as u32, true);
@@ -552,24 +574,73 @@ impl Overlay {
         Ok(target)
     }
 
+    /// The toolbars' opacity: they fade in when they appear, if Windows
+    /// animations are on. A timer drives the fade only while it runs.
+    fn fade(&mut self, visible: bool) -> f32 {
+        if !visible || !self.theme.animations {
+            self.stop_fade();
+            return 1.0;
+        }
+        let start = *self.fade_start.get_or_insert_with(Instant::now);
+        let t = start.elapsed().as_secs_f32() / FADE_SECONDS;
+        if t >= 1.0 {
+            if self.fade_timer {
+                // SAFETY: stops this thread's window timer.
+                unsafe {
+                    let _ = KillTimer(Some(self.hwnd), FADE_TIMER);
+                }
+                self.fade_timer = false;
+            }
+            return 1.0;
+        }
+        if !self.fade_timer {
+            // SAFETY: starts a timer for this thread's window.
+            unsafe { SetTimer(Some(self.hwnd), FADE_TIMER, 15, None) };
+            self.fade_timer = true;
+        }
+        // Ease out (decelerate), like Fluent motion.
+        1.0 - (1.0 - t).powi(3)
+    }
+
+    fn stop_fade(&mut self) {
+        self.fade_start = None;
+        if self.fade_timer {
+            // SAFETY: stops this thread's window timer.
+            unsafe {
+                let _ = KillTimer(Some(self.hwnd), FADE_TIMER);
+            }
+            self.fade_timer = false;
+        }
+    }
+
     /// Draws and presents one frame.
     fn render(&mut self) -> Result<()> {
-        if self.session.is_none() {
-            return Ok(());
-        }
+        let visible = match &self.session {
+            Some(session) => session.toolbars().is_some(),
+            None => return Ok(()),
+        };
+        let fade = self.fade(visible);
         let target = self.target()?;
         let ctx = self.gfx.ctx.clone();
+        let Some(session) = &self.session else {
+            return Ok(());
+        };
+        let bars = session.toolbars();
+        self.painter
+            .prepare(&ctx, session, bars.as_ref(), &self.theme)?;
         // SAFETY: one BeginDraw/EndDraw pair on this thread's context.
         unsafe {
             ctx.SetTarget(&target);
             ctx.BeginDraw();
         }
-        let drawn = match &self.session {
-            Some(session) => self
-                .painter
-                .frame(&ctx, session, &self.shapes, &self.palette),
-            None => Ok(()),
-        };
+        let drawn = self.painter.frame(
+            &ctx,
+            session,
+            &self.shapes,
+            &self.theme,
+            bars.as_ref(),
+            fade,
+        );
         // SAFETY: closes the BeginDraw above, then presents with vsync.
         unsafe {
             let ended = ctx.EndDraw(None, None);
@@ -603,6 +674,18 @@ impl Overlay {
                 Reply::handled(0)
             }
             WM_ERASEBKGND => Reply::handled(1),
+            WM_TIMER if wparam.0 == FADE_TIMER => {
+                self.invalidate();
+                Reply::handled(0)
+            }
+            WM_APP_PREPARE => {
+                if let (Some(session), true) = (&self.session, self.theme.materials) {
+                    if let Err(err) = self.painter.prepare_backdrop(&self.gfx.ctx, session) {
+                        log!("backdrop failed: {err}");
+                    }
+                }
+                Reply::handled(0)
+            }
             WM_SETCURSOR if win::low_word(lparam.0 as usize) == HTCLIENT => {
                 self.update_cursor();
                 Reply::handled(1)
@@ -1079,7 +1162,16 @@ mod tests {
             if !dark {
                 session.hover = Some(Hover::Toolbar(Hit::Button(Button::Save)));
             }
-            let palette = Palette::new(dark, None);
+            let theme = Theme {
+                palette: crate::fluent::Palette::new(dark, None),
+                materials: true,
+                animations: false,
+                high_contrast: false,
+            };
+            let bars = session.toolbars();
+            painter
+                .prepare(&gfx.ctx, &session, bars.as_ref(), &theme)
+                .unwrap();
             // SAFETY: one BeginDraw/EndDraw pair on an offscreen target.
             let image = unsafe {
                 let target = gfx
@@ -1089,7 +1181,7 @@ mod tests {
                 gfx.ctx.SetTarget(&target);
                 gfx.ctx.BeginDraw();
                 painter
-                    .frame(&gfx.ctx, &session, &shapes, &palette)
+                    .frame(&gfx.ctx, &session, &shapes, &theme, bars.as_ref(), 1.0)
                     .unwrap();
                 gfx.ctx.EndDraw(None, None).unwrap();
                 gfx.ctx.SetTarget(None);

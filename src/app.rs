@@ -27,12 +27,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
     FindWindowW, GetMessageW, GetWindowThreadProcessId, PostMessageW, PostQuitMessage,
     RegisterClassExW, RegisterWindowMessageW, TranslateMessage, MSG, SW_SHOWNORMAL, WM_APP,
     WM_CONTEXTMENU, WM_DESTROYCLIPBOARD, WM_DISPLAYCHANGE, WM_ENDSESSION, WM_HOTKEY,
-    WM_RENDERALLFORMATS, WM_RENDERFORMAT, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_POPUP,
+    WM_RENDERALLFORMATS, WM_RENDERFORMAT, WM_SETTINGCHANGE, WM_SYSCOLORCHANGE, WM_THEMECHANGED,
+    WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
 use crate::capture::Timestamp;
 use crate::export::{self, clipboard::Clipboard, Image};
-use crate::fluent::Palette;
+use crate::fluent::{menus, Theme};
 use crate::hotkey::{self, Hotkey};
 use crate::log;
 use crate::overlay::{self, Overlay};
@@ -82,6 +83,7 @@ struct App {
     host: HWND,
     tray: Tray,
     overlay: Overlay,
+    theme: Theme,
     clipboard: Clipboard,
     hotkey: Hotkey,
     registration: Option<hotkey::Registration>,
@@ -117,11 +119,14 @@ pub fn run(options: Options) -> Result<()> {
     let taskbar_created = unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) };
     let hotkey = Hotkey::DEFAULT;
     let tray = Tray::new(host, WM_APP_TRAY, &tooltip(hotkey))?;
-    let overlay = Overlay::new(Some(overlay_proc), Palette::load())?;
+    let theme = Theme::load();
+    menus::set_dark(theme.palette.dark);
+    let overlay = Overlay::new(Some(overlay_proc), theme)?;
     let mut app = App {
         host,
         tray,
         overlay,
+        theme,
         clipboard: Clipboard::new(),
         hotkey,
         registration: None,
@@ -291,6 +296,11 @@ impl App {
             WM_DESTROYCLIPBOARD => self.clipboard.release(),
             WM_ENDSESSION if wparam.0 != 0 => self.clipboard.render_all(self.host),
             WM_DISPLAYCHANGE => self.tray.refresh_icon(),
+            // Theme, accent, high contrast, transparency or animation changes.
+            WM_SETTINGCHANGE | WM_SYSCOLORCHANGE | WM_THEMECHANGED => {
+                self.reload_theme();
+                return None;
+            }
             _ if msg == self.taskbar_created && msg != 0 => {
                 self.tray.refresh_icon();
                 if let Err(err) = self.tray.add() {
@@ -364,6 +374,15 @@ impl App {
             log!("capture failed: {err}");
             self.tray
                 .notify("Couldn't capture the screen", &err.message());
+        }
+    }
+
+    fn reload_theme(&mut self) {
+        let theme = Theme::load();
+        if theme != self.theme {
+            self.theme = theme;
+            menus::set_dark(theme.palette.dark);
+            self.overlay.set_theme(theme);
         }
     }
 

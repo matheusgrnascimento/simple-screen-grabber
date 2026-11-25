@@ -1,7 +1,19 @@
 //! The Windows 11 (Fluent) look: the theme palette, following the Windows
-//! light/dark app theme and accent color.
+//! light/dark app theme, accent color, high contrast, and the transparency
+//! and animation settings.
 
+pub mod menus;
 mod registry;
+
+use windows::Win32::Graphics::Gdi::{
+    GetSysColor, COLOR_GRAYTEXT, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW,
+    COLOR_WINDOWTEXT, SYS_COLOR_INDEX,
+};
+use windows::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
+use windows::Win32::UI::WindowsAndMessaging::{
+    SystemParametersInfoW, SPI_GETCLIENTAREAANIMATION, SPI_GETHIGHCONTRAST,
+    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+};
 
 /// An sRGB color with straight (not premultiplied) alpha.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,6 +75,11 @@ pub struct Palette {
     pub divider: Color,
     /// Ring around color swatches, so white and black stay visible.
     pub swatch_ring: Color,
+    /// The Acrylic tint over the blurred backdrop (its alpha is the
+    /// material's luminosity opacity).
+    pub acrylic_tint: Color,
+    /// The elevation shadow under toolbars and flyouts.
+    pub shadow: Color,
 }
 
 impl Palette {
@@ -110,6 +127,8 @@ impl Palette {
                 subtle_pressed: Color::rgba(0xFF, 0xFF, 0xFF, 0x0A),
                 divider: Color::rgb(0x3D, 0x3D, 0x3D),
                 swatch_ring: Color::rgba(0xFF, 0xFF, 0xFF, 0x4D),
+                acrylic_tint: Color::rgba(0x2C, 0x2C, 0x2C, 0xD9),
+                shadow: Color::rgba(0x00, 0x00, 0x00, 0x66),
             }
         } else {
             let flyout = Color::rgb(0xF9, 0xF9, 0xF9);
@@ -130,9 +149,112 @@ impl Palette {
                 subtle_pressed: Color::rgba(0x00, 0x00, 0x00, 0x06),
                 divider: Color::rgb(0xE5, 0xE5, 0xE5),
                 swatch_ring: Color::rgba(0x00, 0x00, 0x00, 0x40),
+                acrylic_tint: Color::rgba(0xFC, 0xFC, 0xFC, 0xCC),
+                shadow: Color::rgba(0x00, 0x00, 0x00, 0x30),
             }
         }
     }
+}
+
+impl Palette {
+    /// The palette of a high contrast theme: the user's system colors,
+    /// solid, without translucency.
+    pub fn high_contrast() -> Palette {
+        let window = system_color(COLOR_WINDOW);
+        let text = system_color(COLOR_WINDOWTEXT);
+        let highlight = system_color(COLOR_HIGHLIGHT);
+        let on_highlight = system_color(COLOR_HIGHLIGHTTEXT);
+        let disabled = system_color(COLOR_GRAYTEXT);
+        Palette {
+            dark: (u32::from(window.r) + u32::from(window.g) + u32::from(window.b)) < 3 * 128,
+            scrim: Color::rgba(0, 0, 0, 0x66),
+            accent: highlight,
+            accent_hover: highlight,
+            on_accent: on_highlight,
+            handle: window,
+            handle_border: text,
+            flyout: window,
+            flyout_border: text,
+            text,
+            text_secondary: text,
+            text_disabled: disabled,
+            subtle_hover: highlight,
+            subtle_pressed: highlight,
+            divider: text,
+            swatch_ring: text,
+            acrylic_tint: window,
+            shadow: Color::rgba(0, 0, 0, 0),
+        }
+    }
+}
+
+/// The look to draw with: the palette and the user's visual settings.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Theme {
+    pub palette: Palette,
+    /// Acrylic and shadows; off when "Transparency effects" is off or in
+    /// high contrast.
+    pub materials: bool,
+    /// "Animation effects".
+    pub animations: bool,
+    pub high_contrast: bool,
+}
+
+impl Theme {
+    /// The current user's theme and settings.
+    pub fn load() -> Theme {
+        let high_contrast = high_contrast_on();
+        let palette = if high_contrast {
+            Palette::high_contrast()
+        } else {
+            Palette::load()
+        };
+        let transparency = registry::dword(PERSONALIZE_KEY, "EnableTransparency") != Some(0);
+        Theme {
+            palette,
+            materials: transparency && !high_contrast,
+            animations: animations_on(),
+            high_contrast,
+        }
+    }
+}
+
+/// A system color (`GetSysColor`).
+fn system_color(index: SYS_COLOR_INDEX) -> Color {
+    // SAFETY: plain query.
+    let c = unsafe { GetSysColor(index) };
+    Color::rgb(c as u8, (c >> 8) as u8, (c >> 16) as u8)
+}
+
+fn high_contrast_on() -> bool {
+    let mut info = HIGHCONTRASTW {
+        cbSize: size_of::<HIGHCONTRASTW>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: the structure is initialized with its size.
+    let ok = unsafe {
+        SystemParametersInfoW(
+            SPI_GETHIGHCONTRAST,
+            info.cbSize,
+            Some((&mut info as *mut HIGHCONTRASTW).cast()),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+    };
+    ok.is_ok() && info.dwFlags.contains(HCF_HIGHCONTRASTON)
+}
+
+fn animations_on() -> bool {
+    let mut on = windows::core::BOOL(1);
+    // SAFETY: the setting is written to a BOOL.
+    let ok = unsafe {
+        SystemParametersInfoW(
+            SPI_GETCLIENTAREAANIMATION,
+            0,
+            Some((&mut on as *mut windows::core::BOOL).cast()),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+    };
+    ok.is_err() || on.as_bool()
 }
 
 /// Whether the dark app theme is in use (or forced by the environment).
