@@ -412,6 +412,27 @@ impl Overlay {
         })
     }
 
+    fn new_session(&self, capture: Capture, bitmap: ID2D1Bitmap1, mouse: Point) -> Session {
+        let scale = capture.monitor_at(mouse).scale;
+        Session {
+            capture,
+            bitmap,
+            selection: None,
+            drag: Drag::None,
+            mouse,
+            hover: None,
+            tool: None,
+            color: self.default_color,
+            width: (self.default_width * scale)
+                .round()
+                .clamp(MIN_WIDTH, MAX_WIDTH),
+            history: History::default(),
+            drawing: None,
+            flyout_open: false,
+            tooltip: None,
+        }
+    }
+
     /// The size of the last capture (the virtual screen).
     pub fn screen_size(&self) -> (i32, i32) {
         self.last_size
@@ -480,24 +501,7 @@ impl Overlay {
         }
         let mouse = Point::new(cursor.x - capture.origin.x, cursor.y - capture.origin.y);
         let (origin, width, height) = (capture.origin, capture.width, capture.height);
-        let scale = capture.monitor_at(mouse).scale;
-        self.session = Some(Session {
-            capture,
-            bitmap,
-            selection: None,
-            drag: Drag::None,
-            mouse,
-            hover: None,
-            tool: None,
-            color: self.default_color,
-            width: (self.default_width * scale)
-                .round()
-                .clamp(MIN_WIDTH, MAX_WIDTH),
-            history: History::default(),
-            drawing: None,
-            flyout_open: false,
-            tooltip: None,
-        });
+        self.session = Some(self.new_session(capture, bitmap, mouse));
         // SAFETY: positions and shows this thread's window while it is
         // still cloaked, so nothing appears yet.
         unsafe {
@@ -1298,5 +1302,204 @@ mod tests {
             let path = std::path::Path::new(&folder).join(format!("overlay-{name}.png"));
             export::png::write_file(&image, &path).unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::*;
+    use crate::capture::Monitor;
+    use crate::fluent::Palette;
+    use windows::Win32::UI::WindowsAndMessaging::DefWindowProcW;
+
+    extern "system" fn window_proc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        // SAFETY: default handling for this thread's window.
+        unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+    }
+
+    fn lparam(x: i32, y: i32) -> LPARAM {
+        LPARAM(((y as u16 as isize) << 16) | (x as u16 as isize))
+    }
+
+    /// An overlay showing a synthetic 800x600 screen (no window shown).
+    fn overlay() -> Overlay {
+        let theme = Theme {
+            palette: Palette::new(false, None),
+            materials: false,
+            animations: false,
+            high_contrast: false,
+        };
+        let mut overlay = Overlay::new(Some(window_proc), theme).unwrap();
+        let (w, h) = (800, 600);
+        let pixels: Vec<u8> = (0..w * h)
+            .flat_map(|i| [(i % 251) as u8, (i % 241) as u8, (i % 239) as u8, 0])
+            .collect();
+        let monitor = Monitor {
+            rect: Rect::new(0, 0, w, h),
+            scale: 1.0,
+        };
+        let capture = Capture::synthetic(w, h, vec![monitor], pixels);
+        let bitmap = overlay.upload(&capture).unwrap();
+        overlay.session = Some(overlay.new_session(capture, bitmap, Point::new(400, 300)));
+        overlay
+    }
+
+    fn drag(overlay: &mut Overlay, from: (i32, i32), to: (i32, i32)) -> Reply {
+        overlay.message(WM_MOUSEMOVE, WPARAM(0), lparam(from.0, from.1));
+        overlay.message(WM_LBUTTONDOWN, WPARAM(1), lparam(from.0, from.1));
+        overlay.message(
+            WM_MOUSEMOVE,
+            WPARAM(1),
+            lparam((from.0 + to.0) / 2, (from.1 + to.1) / 2),
+        );
+        overlay.message(WM_MOUSEMOVE, WPARAM(1), lparam(to.0, to.1));
+        overlay.message(WM_LBUTTONUP, WPARAM(0), lparam(to.0, to.1))
+    }
+
+    fn click(overlay: &mut Overlay, at: (i32, i32)) -> Reply {
+        overlay.message(WM_MOUSEMOVE, WPARAM(0), lparam(at.0, at.1));
+        overlay.message(WM_LBUTTONDOWN, WPARAM(1), lparam(at.0, at.1));
+        overlay.message(WM_LBUTTONUP, WPARAM(0), lparam(at.0, at.1))
+    }
+
+    fn key(overlay: &mut Overlay, vk: u16) -> Reply {
+        overlay.message(WM_KEYDOWN, WPARAM(usize::from(vk)), LPARAM(0))
+    }
+
+    fn session(overlay: &Overlay) -> &Session {
+        overlay.session.as_ref().unwrap()
+    }
+
+    /// The center of a toolbar button, in overlay pixels.
+    fn button_center(overlay: &Overlay, button: Button) -> (i32, i32) {
+        let bars = session(overlay).toolbars().expect("toolbars are shown");
+        let mut slots = bars.tools.slots.iter().chain(bars.actions.slots.iter());
+        let r = slots
+            .find_map(|s| match s {
+                toolbar::Slot::Button(b, r) if *b == button => Some(*r),
+                _ => None,
+            })
+            .expect("the button exists");
+        (
+            (r.left + r.width() / 2.0) as i32,
+            (r.top + r.height() / 2.0) as i32,
+        )
+    }
+
+    #[test]
+    fn select_draw_undo_move_resize_export_close() {
+        let mut overlay = overlay();
+
+        // A click alone selects nothing.
+        click(&mut overlay, (50, 50));
+        assert_eq!(session(&overlay).selection, None);
+
+        // Dragging selects both corner pixels.
+        drag(&mut overlay, (100, 100), (300, 250));
+        assert_eq!(
+            session(&overlay).selection,
+            Some(Rect::new(100, 100, 301, 251))
+        );
+        assert!(session(&overlay).toolbars().is_some());
+
+        // R picks the rectangle tool; dragging inside draws one.
+        key(&mut overlay, u16::from(b'R'));
+        assert_eq!(session(&overlay).tool, Some(Tool::Rectangle));
+        drag(&mut overlay, (150, 150), (200, 200));
+        assert_eq!(session(&overlay).history.shapes().len(), 1);
+        assert_eq!(
+            session(&overlay).selection,
+            Some(Rect::new(100, 100, 301, 251))
+        );
+
+        // The Undo button removes it; 3 then picks green.
+        let undo = button_center(&overlay, Button::Undo);
+        click(&mut overlay, undo);
+        assert_eq!(session(&overlay).history.shapes().len(), 0);
+        key(&mut overlay, u16::from(b'4'));
+        assert_eq!(session(&overlay).color, 3);
+
+        // Clicking the active tool's button turns it off; dragging inside
+        // the selection then moves it.
+        let rectangle = button_center(&overlay, Button::Tool(Tool::Rectangle));
+        click(&mut overlay, rectangle);
+        assert_eq!(session(&overlay).tool, None);
+        drag(&mut overlay, (200, 200), (220, 190));
+        assert_eq!(
+            session(&overlay).selection,
+            Some(Rect::new(120, 90, 321, 241))
+        );
+
+        // The bottom-right handle resizes.
+        drag(&mut overlay, (321, 241), (401, 301));
+        assert_eq!(
+            session(&overlay).selection,
+            Some(Rect::new(120, 90, 401, 301))
+        );
+
+        // The arrow keys nudge it.
+        key(&mut overlay, VK_LEFT.0);
+        assert_eq!(
+            session(&overlay).selection,
+            Some(Rect::new(119, 90, 400, 301))
+        );
+
+        // The mouse wheel changes the stroke width.
+        overlay.message(WM_MOUSEWHEEL, WPARAM((2 * 120) << 16), lparam(10, 10));
+        assert_eq!(session(&overlay).width, 5.0);
+
+        // Export: the selection's pixels.
+        let (image, _) = overlay.export().unwrap().unwrap();
+        assert_eq!((image.width, image.height), (281, 211));
+
+        // The Save button asks the app to save; Esc to close.
+        let save = button_center(&overlay, Button::Save);
+        assert_eq!(click(&mut overlay, save).event, Some(Event::Save));
+        assert_eq!(key(&mut overlay, VK_ESCAPE.0).event, Some(Event::Close));
+        overlay.close();
+        assert!(overlay.session.is_none());
+    }
+
+    #[test]
+    fn double_click_inside_copies() {
+        let mut overlay = overlay();
+        drag(&mut overlay, (100, 100), (300, 250));
+        let reply = overlay.message(WM_LBUTTONDBLCLK, WPARAM(1), lparam(200, 200));
+        assert_eq!(reply.event, Some(Event::Copy));
+        let reply = overlay.message(WM_LBUTTONDBLCLK, WPARAM(1), lparam(500, 500));
+        assert_eq!(reply.event, None);
+    }
+
+    #[test]
+    fn the_color_flyout_opens_picks_and_closes() {
+        let mut overlay = overlay();
+        drag(&mut overlay, (100, 100), (300, 250));
+        let color = button_center(&overlay, Button::Color);
+        click(&mut overlay, color);
+        assert!(session(&overlay).flyout_open);
+        let swatch = session(&overlay)
+            .toolbars()
+            .unwrap()
+            .flyout
+            .unwrap()
+            .swatches[4];
+        click(
+            &mut overlay,
+            (
+                (swatch.left + swatch.width() / 2.0) as i32,
+                (swatch.top + swatch.height() / 2.0) as i32,
+            ),
+        );
+        assert_eq!(session(&overlay).color, 4);
+        assert!(!session(&overlay).flyout_open);
+        // Esc closes an open flyout before the overlay.
+        click(&mut overlay, color);
+        assert_eq!(key(&mut overlay, VK_ESCAPE.0).event, None);
+        assert!(!session(&overlay).flyout_open);
     }
 }
