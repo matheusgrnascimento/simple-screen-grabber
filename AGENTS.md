@@ -7,29 +7,36 @@ Guidelines for AI agents and contributors working in this repository.
 Simple Screen Grabber is a Windows desktop app for screenshots: press a shortcut, select an area, annotate it, then save it as PNG or copy it. It stays in the tray and never uploads anything.
 
 - Language: Rust (edition 2021), stable MSVC toolchain.
-- Platform APIs: the `windows` crate only: Win32, Direct2D, DirectWrite, WIC and DXGI. No UI framework, no async runtime, no image crate.
+- Platform APIs: the `windows` crate only (plus `windows-numerics`, its vector and matrix types): Win32, Direct2D, DirectWrite, WIC and DXGI. No UI framework, no async runtime, no image crate.
+- Graphics: Direct2D on WARP, the Direct3D software rasterizer (a hardware device costs 240 ms and 52 MB that the driver keeps; see `src/gfx.rs`).
 - UI: one borderless overlay window drawn with Direct2D in the Windows 11 (Fluent) style, a tray icon and native menus.
 - Priorities, in order: low resource use, low latency, efficiency, image quality.
 
 ### Layout
 
-The code does not exist yet. [PLAN.md](PLAN.md) holds the design, the performance targets and the milestones. The planned modules:
+[PLAN.md](PLAN.md) holds the design, the performance targets, the milestones and the implementation notes.
 
-- `src/main.rs`: entry point, single instance, message loop.
-- `src/hotkey.rs`: global shortcut registration.
+- `src/main.rs`: entry point and command line (`--autostart`, `--bench`, `--enable-autostart`, `--disable-autostart`).
+- `src/app.rs`: single instance, the hidden host window, tray menu commands, settings reload, the save thread, clipboard messages and the message loop.
+- `src/hotkey.rs`: parsing and registering the global shortcut.
 - `src/tray.rs`: tray icon, menu and notifications.
-- `src/capture.rs`: virtual screen capture.
-- `src/overlay/`: overlay window, rendering, selection and toolbars.
-- `src/annotate/`: shapes, tools and undo/redo history.
-- `src/export/`: PNG encoding (WIC) and clipboard.
-- `src/fluent/`: theme, accent color, palette, Acrylic, icons and fonts.
-- `src/config.rs`: settings file and portable mode.
+- `src/capture.rs`: virtual screen capture (GDI) and monitors.
+- `src/geometry.rs`: pixel rectangles and points.
+- `src/gfx.rs`: the Direct3D (WARP), Direct2D and DirectWrite devices.
+- `src/overlay/`: the overlay window, session and input (`mod.rs`), selection geometry (`selection.rs`), toolbar layout and hit testing (`toolbar.rs`), label placement (`layout.rs`), drawing, Acrylic and shadows (`render.rs`), and the instant dimming window (`dimmer.rs`).
+- `src/annotate/`: tools, shapes and undo history (`mod.rs`), drawn with Direct2D by `draw.rs` for both the overlay and the export.
+- `src/export/`: the output image, cropping, drawing with annotations and saving (`mod.rs`), PNG with WIC (`png.rs`), the clipboard with delayed rendering (`clipboard.rs`).
+- `src/fluent/`: palette and theme with the Windows settings (`mod.rs`), registry reads, dark menus (`menus.rs`).
+- `src/config.rs`: settings file, its parser and portable mode.
 - `src/paths.rs`: known folders and file naming.
+- `src/startup.rs`: the Start with Windows value.
 - `src/bench.rs`: the `--bench` measurements.
+- `src/log.rs`, `src/win.rs`: logging helper, handle wrappers and small Win32 helpers.
+- `build.rs`, `app.manifest`: Windows resources (manifest, icon, version) embedded without extra tools.
 - `tools/genicon/` and `assets/`: the app icon, generated from code. Change the icon in the generator, never by editing the image files.
-- `installer/`: the WiX MSI installer.
+- `installer/`: the WiX MSI installer and the script that builds it with the portable package.
 
-Keep this section in sync with the code as modules land.
+Keep this section in sync with the code.
 
 ## Language
 
@@ -45,6 +52,8 @@ cargo build --release
 ```
 
 Run formatting, clippy and tests before every commit. Fix warnings instead of silencing them.
+
+To check the look, the ignored `render_previews` test draws the overlay over a synthetic screen into PNG files in the folder set in `SIMPLE_SCREEN_GRABBER_PREVIEW` (`cargo test render_previews -- --ignored`). To measure, run the release build with `--bench | Out-Host`.
 
 ## Coding conventions
 
