@@ -1,6 +1,6 @@
 [package]
 name = "simple-screen-grabber"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Native Windows screenshot tool: select an area, annotate it, save or copy it"
 license = "MIT"
