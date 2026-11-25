@@ -48,6 +48,7 @@ Every toolbar button has a tooltip with its shortcut. Launching the app again wh
 | `save_folder` | `''` | Empty: the Windows Screenshots folder. Use single quotes for paths (`'D:\Shots'`); `%VARIABLES%` expand and relative paths start at the settings folder |
 | `color` | `"blue"` | `red`, `orange`, `yellow`, `green`, `blue`, `purple`, `black` or `white` |
 | `stroke_width` | `3` | 1 to 20 pixels at 100% display scale |
+| `include_cursor` | `false` | `true` draws the mouse pointer on the capture (config file only) |
 
 **Portable mode**: with a file named `portable` next to `Simple Screen Grabber.exe`, the settings stay in that folder and nothing is written anywhere else (Start with Windows is then not available).
 

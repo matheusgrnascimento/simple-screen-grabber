@@ -314,6 +314,8 @@ pub struct Overlay {
     /// starts with, from the settings.
     default_color: usize,
     default_width: f32,
+    /// Whether captures include the mouse pointer.
+    include_cursor: bool,
     /// Dims the screen at once while it is being copied.
     dimmer: Option<dimmer::Dimmer>,
     /// The steps of the last `open`, for the benchmark.
@@ -406,6 +408,7 @@ impl Overlay {
             fade_timer: false,
             default_color: DEFAULT_COLOR,
             default_width: 3.0,
+            include_cursor: false,
             dimmer,
             last_open: OpenTimings::default(),
             last_size: (0, 0),
@@ -463,6 +466,11 @@ impl Overlay {
     }
 
     /// The color and stroke width the next captures start with.
+    /// Chooses whether captures include the mouse pointer.
+    pub fn set_include_cursor(&mut self, include: bool) {
+        self.include_cursor = include;
+    }
+
     pub fn set_defaults(&mut self, color: usize, width: f32) {
         self.default_color = color.min(COLORS.len() - 1);
         self.default_width = width;
@@ -483,7 +491,7 @@ impl Overlay {
         if let Some(dimmer) = &self.dimmer {
             dimmer.show();
         }
-        let capture = match capture::capture_screen() {
+        let capture = match capture::capture_screen(self.include_cursor) {
             Ok(capture) => capture,
             Err(err) => {
                 self.hide_dimmer();

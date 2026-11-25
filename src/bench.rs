@@ -105,10 +105,10 @@ pub fn run() -> Result<()> {
     let mut without_layered = Vec::new();
     for _ in 0..ITERATIONS {
         let t = Instant::now();
-        drop(capture::capture_screen_with(true)?);
+        drop(capture::capture_screen_with(true, false)?);
         with_layered.push(t.elapsed());
         let t = Instant::now();
-        drop(capture::capture_screen_with(false)?);
+        drop(capture::capture_screen_with(false, false)?);
         without_layered.push(t.elapsed());
     }
 

@@ -33,6 +33,8 @@ pub struct Config {
     pub color: usize,
     /// Default stroke width in DIPs, multiplied by the display scale.
     pub stroke_width: f32,
+    /// Whether captures include the mouse pointer.
+    pub include_cursor: bool,
 }
 
 impl Default for Config {
@@ -42,6 +44,7 @@ impl Default for Config {
             save_folder: None,
             color: DEFAULT_COLOR,
             stroke_width: 3.0,
+            include_cursor: false,
         }
     }
 }
@@ -144,6 +147,8 @@ color = \"{color}\"
 
 # Default stroke width in pixels at 100% display scale, {min} to {max}.
 stroke_width = {width}
+# Include the mouse pointer in captures: true or false.
+include_cursor = false
 ",
         hotkey = Hotkey::DEFAULT,
         colors = colors.join(", "),
@@ -237,6 +242,7 @@ fn set_value(text: &str, key: &str, literal: &str) -> String {
 enum Value {
     Text(String),
     Integer(i64),
+    Bool(bool),
 }
 
 /// Parses the settings. Relative folders start at `base`. Returns the
@@ -291,10 +297,15 @@ pub fn parse(text: &str, base: &Path) -> (Config, Vec<String>) {
             ("stroke_width", Value::Integer(n)) => {
                 Err(format!("{n} is outside {MIN_STROKE} to {MAX_STROKE}"))
             }
-            ("hotkey" | "save_folder" | "color", Value::Integer(_)) => {
+            ("include_cursor", Value::Bool(on)) => {
+                config.include_cursor = on;
+                Ok(())
+            }
+            ("include_cursor", _) => Err("expected true or false".into()),
+            ("hotkey" | "save_folder" | "color", Value::Integer(_) | Value::Bool(_)) => {
                 Err("expected text in quotes".into())
             }
-            ("stroke_width", Value::Text(_)) => Err("expected a number".into()),
+            ("stroke_width", Value::Text(_) | Value::Bool(_)) => Err("expected a number".into()),
             (other, _) => Err(format!("{other} is not a setting")),
         };
         if let Err(err) = applied {
@@ -353,6 +364,11 @@ fn value(text: &str) -> Result<Value, String> {
         }
         Some(_) => {
             let number = text.split('#').next().unwrap_or("").trim();
+            match number {
+                "true" => return Ok(Value::Bool(true)),
+                "false" => return Ok(Value::Bool(false)),
+                _ => {}
+            }
             number
                 .replace('_', "")
                 .parse::<i64>()
@@ -420,6 +436,15 @@ mod tests {
         assert_eq!(config.save_folder, Some(PathBuf::from(r"D:\Shots")));
         assert_eq!(config.color, 4);
         assert_eq!(config.stroke_width, 5.0);
+    }
+
+    #[test]
+    fn the_cursor_setting_takes_true_or_false() {
+        assert!(parse_ok("include_cursor = true").include_cursor);
+        assert!(!parse_ok("include_cursor = false # no").include_cursor);
+        let (config, problems) = parse("include_cursor = 1", Path::new("C:\\"));
+        assert!(!config.include_cursor);
+        assert!(problems[0].contains("true or false"), "{problems:?}");
     }
 
     #[test]

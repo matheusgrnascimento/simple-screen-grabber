@@ -13,7 +13,9 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    DrawIconEx, GetCursorInfo, GetIconInfo, GetSystemMetrics, CURSORINFO, CURSOR_SHOWING,
+    DI_NORMAL, HICON, ICONINFO, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+    SM_YVIRTUALSCREEN,
 };
 
 use crate::geometry::{Point, Rect};
@@ -150,13 +152,13 @@ impl Drop for MemoryDc {
 
 /// Copies the virtual screen into memory, including layered windows such
 /// as menus and tooltips.
-pub fn capture_screen() -> Result<Capture> {
-    capture_screen_with(true)
+pub fn capture_screen(cursor: bool) -> Result<Capture> {
+    capture_screen_with(true, cursor)
 }
 
 /// Copies the virtual screen; `layered` adds CAPTUREBLT, which includes
-/// layered windows.
-pub fn capture_screen_with(layered: bool) -> Result<Capture> {
+/// layered windows, and `cursor` draws the mouse pointer on the copy.
+pub fn capture_screen_with(layered: bool, cursor: bool) -> Result<Capture> {
     // SAFETY: system metric queries; with per-monitor DPI awareness they
     // are in physical pixels.
     let (x, y, width, height) = unsafe {
@@ -211,9 +213,47 @@ pub fn capture_screen_with(layered: bool) -> Result<Capture> {
             SRCCOPY
         };
         let copied = BitBlt(memory.0, 0, 0, width, height, Some(screen.0), x, y, rop);
+        if copied.is_ok() && cursor {
+            draw_cursor(memory.0, Point::new(x, y));
+        }
         SelectObject(memory.0, previous);
         copied?;
         Ok(capture)
+    }
+}
+
+/// Draws the mouse pointer, if shown, on the copy of the screen whose`n/// top-left corner is `origin` in desktop coordinates. Failures leave the`n/// copy as it is: a missing pointer is better than a missing screenshot.
+fn draw_cursor(dc: HDC, origin: Point) {
+    let mut info = CURSORINFO {
+        cbSize: size_of::<CURSORINFO>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: queries the pointer, reads its hotspot and draws it on a DC
+    // owned by the caller; the bitmaps GetIconInfo creates are deleted.
+    unsafe {
+        if GetCursorInfo(&mut info).is_err() || info.flags.0 & CURSOR_SHOWING.0 == 0 {
+            return;
+        }
+        let icon = HICON(info.hCursor.0);
+        let mut parts = ICONINFO::default();
+        if GetIconInfo(icon, &mut parts).is_err() {
+            return;
+        }
+        let _ = DrawIconEx(
+            dc,
+            info.ptScreenPos.x - origin.x - parts.xHotspot as i32,
+            info.ptScreenPos.y - origin.y - parts.yHotspot as i32,
+            icon,
+            0,
+            0,
+            0,
+            None,
+            DI_NORMAL,
+        );
+        let _ = DeleteObject(parts.hbmMask.into());
+        if !parts.hbmColor.is_invalid() {
+            let _ = DeleteObject(parts.hbmColor.into());
+        }
     }
 }
 

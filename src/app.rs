@@ -192,6 +192,7 @@ pub fn run(options: Options) -> Result<()> {
     menus::set_dark(theme.palette.dark);
     let mut overlay = Overlay::new(Some(overlay_proc), theme)?;
     overlay.set_defaults(config.color, config.stroke_width);
+    overlay.set_include_cursor(config.include_cursor);
     let watch = FolderWatch::start(&location.folder);
     let mut app = App {
         host,
@@ -727,6 +728,7 @@ impl App {
         self.config = config;
         self.overlay
             .set_defaults(self.config.color, self.config.stroke_width);
+        self.overlay.set_include_cursor(self.config.include_cursor);
         if hotkey_changed {
             self.tray.set_tooltip(&tooltip(self.config.hotkey));
             self.register_hotkey();
