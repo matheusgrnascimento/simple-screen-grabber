@@ -1,6 +1,6 @@
 [package]
 name = "simple-screen-grabber"
-version = "0.1.1"
+version.workspace = true
 edition = "2021"
 description = "Native Windows screenshot tool: select an area, annotate it, save or copy it"
 license = "MIT"
@@ -9,7 +9,10 @@ readme = "README.md"
 publish = false
 
 [workspace]
-members = ["tools/genicon"]
+members = ["tools/genicon", "installer/setup"]
+
+[workspace.package]
+version = "0.1.1"
 
 [dependencies]
 # Direct2D's vector and matrix types.

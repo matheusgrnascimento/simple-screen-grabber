@@ -34,6 +34,13 @@ Write-Host "==> Building release $version" -ForegroundColor Cyan
 cargo build --release
 if ($LASTEXITCODE -ne 0) { throw "cargo build failed." }
 
+Write-Host "==> Building the setup (embeds the executable)" -ForegroundColor Cyan
+cargo build --release -p simple-screen-grabber-setup
+if ($LASTEXITCODE -ne 0) { throw "setup build failed." }
+$setup = Join-Path $dist "SimpleScreenGrabber-$version-setup.exe"
+New-Item -ItemType Directory -Path $dist -Force | Out-Null
+Copy-Item "target\release\simple-screen-grabber-setup.exe" $setup -Force
+
 Write-Host "==> Staging files" -ForegroundColor Cyan
 foreach ($dir in $stage, $portable) {
     if (Test-Path $dir) { Remove-Item $dir -Recurse -Force }
@@ -61,6 +68,6 @@ New-Item -ItemType File -Path "$portable\portable" | Out-Null
 if (Test-Path $zip) { Remove-Item $zip }
 Compress-Archive -Path "$portable\*" -DestinationPath $zip
 
-foreach ($file in $msi, $zip) {
+foreach ($file in $setup, $msi, $zip) {
     Write-Host "==> $file ($([math]::Round((Get-Item $file).Length / 1KB)) KB)" -ForegroundColor Green
 }

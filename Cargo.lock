@@ -36,6 +36,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "simple-screen-grabber-setup"
+version = "0.1.1"
+dependencies = [
+ "windows",
+ "windows-numerics",
+]
+
+[[package]]
 name = "syn"
 version = "2.0.119"
 source = "registry+https://github.com/rust-lang/crates.io-index"
