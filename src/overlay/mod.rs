@@ -26,7 +26,7 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1,
 };
 use windows::Win32::Graphics::Dwm::{
-    DwmSetWindowAttribute, DWMWA_CLOAK, DWMWA_TRANSITIONS_FORCEDISABLED,
+    DwmFlush, DwmSetWindowAttribute, DWMWA_CLOAK, DWMWA_TRANSITIONS_FORCEDISABLED,
     DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DWM_WINDOW_CORNER_PREFERENCE,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
@@ -538,6 +538,13 @@ impl Overlay {
         {
             self.close();
             return Err(err);
+        }
+        // The frame just presented must reach the compositor before the
+        // window is uncloaked. Otherwise DWM can show for a moment the last
+        // frame of the previous capture (selection, toolbars) it kept.
+        // SAFETY: plain wait for the next composition pass.
+        unsafe {
+            let _ = DwmFlush();
         }
         let rendered = started.elapsed();
         self.last_open = OpenTimings {
