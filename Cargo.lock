@@ -29,7 +29,7 @@ dependencies = [
 
 [[package]]
 name = "simple-screen-grabber"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "windows",
  "windows-numerics",
@@ -37,7 +37,7 @@ dependencies = [
 
 [[package]]
 name = "simple-screen-grabber-setup"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "windows",
  "windows-numerics",
