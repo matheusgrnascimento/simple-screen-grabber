@@ -36,9 +36,11 @@ impl Hotkey {
         key: b'S' as u32,
     };
 
-    /// Parses a combination such as `Ctrl+Alt+S` or `Shift+PrintScreen`.
-    /// Letters, digits and Space need at least one modifier, so typing is
-    /// never captured.
+    /// Parses a combination such as `Ctrl+Alt+S`, `Shift+PrintScreen` or a
+    /// single key such as `NumMultiply` (alias `*`). Any key can be the
+    /// shortcut, with or without modifiers; `0xNN` names a virtual-key code
+    /// that has no name. A key without modifiers stops working as a typing
+    /// key in every app while the shortcut is registered.
     pub fn parse(text: &str) -> Result<Hotkey, String> {
         let mut hotkey = Hotkey {
             ctrl: false,
@@ -67,12 +69,6 @@ impl Hotkey {
         }
         hotkey.key =
             key_code(key_name).ok_or_else(|| format!("\"{key_name}\" is not a supported key"))?;
-        let typing_key = matches!(hotkey.key, 0x20 | 0x30..=0x39 | 0x41..=0x5A);
-        if typing_key && !(hotkey.ctrl || hotkey.alt || hotkey.win) {
-            return Err(format!(
-                "\"{text}\" needs Ctrl, Alt or Win, so it does not block typing"
-            ));
-        }
         Ok(hotkey)
     }
 
@@ -99,13 +95,10 @@ impl Hotkey {
             key,
         };
         // The text form validates the key and the typing rule.
-        Some(Hotkey::parse(&hotkey.to_string()).map_err(|_| {
-            if key_code(&key_name(key)).is_some() {
-                "Add Ctrl, Alt or Win, so typing still works".to_string()
-            } else {
-                "That key can't be used in a shortcut".to_string()
-            }
-        }))
+        Some(
+            Hotkey::parse(&hotkey.to_string())
+                .map_err(|_| "That key can't be used in a shortcut".to_string()),
+        )
     }
 
     fn modifiers(&self) -> HOT_KEY_MODIFIERS {
@@ -140,17 +133,53 @@ impl fmt::Display for Hotkey {
     }
 }
 
-const NAMED_KEYS: [(&str, u32); 10] = [
+const NAMED_KEYS: &[(&str, u32)] = &[
+    ("Backspace", 0x08),
+    ("Tab", 0x09),
+    ("Enter", 0x0D),
+    ("Pause", 0x13),
+    ("CapsLock", 0x14),
+    ("Escape", 0x1B),
     ("Space", 0x20),
     ("PageUp", 0x21),
     ("PageDown", 0x22),
     ("End", 0x23),
     ("Home", 0x24),
+    ("Left", 0x25),
+    ("Up", 0x26),
+    ("Right", 0x27),
+    ("Down", 0x28),
     ("PrintScreen", 0x2C),
     ("Insert", 0x2D),
     ("Delete", 0x2E),
-    ("Pause", 0x13),
+    ("Num0", 0x60),
+    ("Num1", 0x61),
+    ("Num2", 0x62),
+    ("Num3", 0x63),
+    ("Num4", 0x64),
+    ("Num5", 0x65),
+    ("Num6", 0x66),
+    ("Num7", 0x67),
+    ("Num8", 0x68),
+    ("Num9", 0x69),
+    ("NumMultiply", 0x6A),
+    ("NumAdd", 0x6B),
+    ("NumSubtract", 0x6D),
+    ("NumDecimal", 0x6E),
+    ("NumDivide", 0x6F),
+    ("NumLock", 0x90),
     ("ScrollLock", 0x91),
+    (";", 0xBA),
+    ("=", 0xBB),
+    (",", 0xBC),
+    ("-", 0xBD),
+    (".", 0xBE),
+    ("/", 0xBF),
+    ("`", 0xC0),
+    ("[", 0xDB),
+    ("\\", 0xDC),
+    ("]", 0xDD),
+    ("'", 0xDE),
 ];
 
 fn key_code(name: &str) -> Option<u32> {
@@ -165,7 +194,19 @@ fn key_code(name: &str) -> Option<u32> {
             return Some(0x70 + n - 1);
         }
     }
+    if let Some(code) = upper
+        .strip_prefix("0X")
+        .and_then(|h| u32::from_str_radix(h, 16).ok())
+    {
+        // Any virtual-key code but the modifiers (and the mouse buttons).
+        let modifier = matches!(code, 0x10..=0x12 | 0xA0..=0xA5 | 0x5B | 0x5C);
+        return ((0x07..=0xFE).contains(&code) && !modifier).then_some(code);
+    }
     let alias = match upper.as_str() {
+        "*" | "NUM*" => "NumMultiply",
+        "ESC" => "Escape",
+        "RETURN" => "Enter",
+        "BKSP" => "Backspace",
         "PRTSC" | "PRTSCN" | "PRINT" => "PrintScreen",
         "DEL" => "Delete",
         "INS" => "Insert",
@@ -241,12 +282,19 @@ mod tests {
     }
 
     #[test]
-    fn typing_keys_need_a_modifier() {
-        assert!(Hotkey::parse("S").is_err());
-        assert!(Hotkey::parse("Shift+S").is_err());
-        assert!(Hotkey::parse("Space").is_err());
-        assert!(Hotkey::parse("Alt+1").is_ok());
-        assert!(Hotkey::parse("F9").is_ok());
+    fn any_key_works_with_or_without_modifiers() {
+        for text in ["S", "Shift+S", "Space", "Alt+1", "F9", "Ctrl+Enter", "Up"] {
+            assert!(Hotkey::parse(text).is_ok(), "{text}");
+        }
+        let star = Hotkey::parse("*").unwrap();
+        assert_eq!(star.key, 0x6A);
+        assert_eq!(star.to_string(), "NumMultiply");
+        assert_eq!(Hotkey::parse("Shift+8").unwrap().to_string(), "Shift+8");
+        assert_eq!(Hotkey::parse("Ctrl+;").unwrap().key, 0xBA);
+        // A key with no name round trips as its code.
+        let odd = Hotkey::parse("Ctrl+0xE2").unwrap();
+        assert_eq!(odd.to_string(), "Ctrl+0xE2");
+        assert_eq!(Hotkey::parse(&odd.to_string()), Ok(odd));
     }
 
     #[test]
@@ -257,7 +305,10 @@ mod tests {
             "Ctrl+Ctrl+S",
             "Hyper+S",
             "Ctrl+F25",
-            "Ctrl+Enter",
+            "Ctrl+Shift",
+            "0x10",
+            "0x00",
+            "Ctrl+0x1FF",
         ] {
             assert!(Hotkey::parse(text).is_err(), "{text}");
         }
@@ -279,13 +330,21 @@ mod tests {
         // A modifier alone: still pressing.
         assert_eq!(Hotkey::from_keys(0x11, true, false, false, false), None);
         assert_eq!(Hotkey::from_keys(0xA4, false, true, false, false), None);
-        // A letter alone would block typing; Enter is not supported.
+        // A letter alone, and keys with no name, are fine.
         assert!(
-            Hotkey::from_keys(u32::from(b'A'), false, false, true, false)
+            Hotkey::from_keys(u32::from(b'A'), false, false, false, false)
                 .unwrap()
-                .is_err()
+                .is_ok()
         );
-        assert!(Hotkey::from_keys(0x0D, true, false, false, false)
+        assert_eq!(
+            Hotkey::from_keys(0x6A, false, false, false, false)
+                .unwrap()
+                .unwrap()
+                .to_string(),
+            "NumMultiply"
+        );
+        // A mouse button code is not a key.
+        assert!(Hotkey::from_keys(0x01, false, false, false, false)
             .unwrap()
             .is_err());
     }

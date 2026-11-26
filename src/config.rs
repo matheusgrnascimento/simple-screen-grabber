@@ -485,7 +485,7 @@ mod tests {
     #[test]
     fn problems_keep_the_defaults_and_say_where() {
         let (config, problems) = parse(
-            "hotkey = \"S\"\n\
+            "hotkey = \"Ctrl+Ctrl+S\"\n\
              color = \"pink\"\n\
              stroke_width = 99\n\
              stroke_width = 2\n\

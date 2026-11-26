@@ -44,7 +44,7 @@ Every toolbar button has a tooltip with its shortcut. Launching the app again wh
 
 | Setting | Default | |
 |---|---|---|
-| `hotkey` | `"Ctrl+Alt+S"` | Modifiers `Ctrl`, `Alt`, `Shift`, `Win` and a letter, digit, `F1`-`F24`, `PrintScreen`, `Insert`, `Delete`, `Home`, `End`, `PageUp`, `PageDown`, `Pause` or `ScrollLock`. Letters and digits need Ctrl, Alt or Win |
+| `hotkey` | `"Ctrl+Alt+S"` | Optional modifiers `Ctrl`, `Alt`, `Shift`, `Win` and one key: a letter, digit, `F1`-`F24`, arrows, `Enter`, `Tab`, `Space`, `PrintScreen`, `Insert`, `Delete`, `Home`, `End`, `PageUp`, `PageDown`, `Pause`, `ScrollLock`, numpad keys (`Num0`-`Num9`, `NumMultiply` or `*`, `NumAdd`, `NumSubtract`, `NumDivide`, `NumDecimal`), punctuation (`;` `=` `,` `-` `.` `/` `` ` `` `[` `\` `]` `'`) or `0xNN` for a virtual-key code. A key without modifiers stops typing that key in every app |
 | `save_folder` | `''` | Empty: the Windows Screenshots folder. Use single quotes for paths (`'D:\Shots'`); `%VARIABLES%` expand and relative paths start at the settings folder |
 | `color` | `"blue"` | `red`, `orange`, `yellow`, `green`, `blue`, `purple`, `black` or `white` |
 | `stroke_width` | `3` | 1 to 20 pixels at 100% display scale |

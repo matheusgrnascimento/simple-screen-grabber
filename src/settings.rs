@@ -1593,8 +1593,8 @@ mod tests {
             ..NONE
         };
         assert_eq!(form.key_down(VK_CONTROL.0, ctrl_shift), (true, None));
-        // A letter alone is refused and listening goes on.
-        assert_eq!(form.key_down(u16::from(b'X'), NONE), (true, None));
+        // A key that cannot be a shortcut is refused and listening goes on.
+        assert_eq!(form.key_down(0x01, NONE), (true, None));
         assert!(form.error.is_some() && form.recording);
         let (_, action) = form.key_down(u16::from(b'X'), ctrl_shift);
         assert_eq!(
